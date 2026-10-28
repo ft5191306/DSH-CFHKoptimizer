@@ -1,0 +1,9 @@
+# dsh-cf-pin — bundle patch.
+#
+# 一行，挂在宿主层：定时探测、判定、写 hosts 都要在进程级运行，
+# 与具体 preset / agent 无关，所以不带 scope 标签。
+- insert:
+    - id: cf-pin
+      name: '@local/dsh-cf-pin'
+      config:
+        autoWrite: false

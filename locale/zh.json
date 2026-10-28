@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "优选线路",
+    "description": "持续测量 open-design.ai 的 Cloudflare 边缘 IP，链路变慢时自动切换到更快的线路（改写 hosts 优选段）。"
+  }
+}

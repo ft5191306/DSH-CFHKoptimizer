@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Preferred Route",
+    "description": "Continuously measures Cloudflare edge IPs for open-design.ai and switches to a faster route by rewriting the managed hosts block when the link degrades."
+  }
+}

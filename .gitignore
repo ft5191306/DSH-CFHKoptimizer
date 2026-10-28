@@ -1,0 +1,17 @@
+# 截图与像素量测产物 —— 只对本机有意义，且体积大（约 8MB / 69 个文件）
+_shots/
+
+# 编辑过程中的备份，不进仓库
+*.bak
+*.bak-*
+*~.bak
+
+# 运行期数据（配置与状态落在 $DSH_HOME 下，这里只是防御性排除）
+cf-pin-data/
+*.log
+
+# Windows / 编辑器噪音
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
