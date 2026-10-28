@@ -133,7 +133,9 @@ check('默认值与设计一致', () => {
   assert.equal(c.switchThresholdMs, 150)
   assert.equal(c.maxSwitchesPerDay, 48)
   assert.equal(c.probeWhileThinking, true)
-  assert.equal(c.skin, 'ring')
+  // v0.2.0：皮肤换成 ring-core（旧 ring/taiji 连实现一起删了），并新增 showUi。
+  assert.equal(c.showUi, true)
+  assert.equal(c.skin, 'ring-core')
   assert.equal(c.probeWhileWaiting, undefined)
   assert.equal(c.addresses.filter((a) => a.enabled).length, 1)
   assert.equal(c.addresses.find((a) => a.enabled).address, 'amr-link.open-design.ai')

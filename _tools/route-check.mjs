@@ -100,21 +100,31 @@ check('并发 12 → 一轮 25s', () => assert.equal(cfg2.payload.value.derived.
 // 这一条是给真实事故兜底的：手改 config.json 写入 skin 后，旧代码的
 // normalizeConfig 不认识它，保存其他字段时把它整个丢掉，而且不报错。
 console.log('== /config 新增字段不被吞掉 ==')
-const skinSet = await call('config', { config: { skin: 'ring' } })
-check('skin:ring 被接受', () => assert.equal(skinSet.payload.value.config.skin, 'ring'))
+// v0.2.0：白名单是 ring-core / afterglow。旧 id（ring / taiji / fan）
+// 一律迁到 ring-core——前两代实现连画法一起删了。
+const skinSet = await call('config', { config: { skin: 'ring-core' } })
+check('skin:ring-core 被接受', () => assert.equal(skinSet.payload.value.config.skin, 'ring-core'))
 check('skin 有落盘', () => assert.equal(skinSet.payload.value.saved, true))
 const skinBad = await call('config', { config: { skin: 'not-a-skin' } })
-check('未知 skin 退回 ring', () => assert.equal(skinBad.payload.value.config.skin, 'ring'))
-const skinTaiji = await call('config', { config: { skin: 'taiji' } })
-check('skin:taiji 被接受', () => assert.equal(skinTaiji.payload.value.config.skin, 'taiji'))
-// 三格点阵已删除：旧配置里残留的 'fan' 必须被迁到 ring，而不是保留下来
+check('未知 skin 退回 ring-core', () => assert.equal(skinBad.payload.value.config.skin, 'ring-core'))
+const skinGlow = await call('config', { config: { skin: 'afterglow' } })
+check('skin:afterglow 被接受', () => assert.equal(skinGlow.payload.value.config.skin, 'afterglow'))
+// 旧 id 已废弃：残留值必须被迁到 ring-core，而不是保留下来
 const skinFan = await call('config', { config: { skin: 'fan' } })
-check('已删除的 fan 被迁到 ring', () => assert.equal(skinFan.payload.value.config.skin, 'ring'))
+check('已删除的 fan 被迁到 ring-core', () => assert.equal(skinFan.payload.value.config.skin, 'ring-core'))
+const skinOld = await call('config', { config: { skin: 'ring' } })
+check('旧 id ring 被迁到 ring-core', () => assert.equal(skinOld.payload.value.config.skin, 'ring-core'))
 // 改别的字段时，skin 不能被顺手抹掉
-await call('config', { config: { skin: 'taiji' } })
+await call('config', { config: { skin: 'afterglow' } })
 const others = await call('config', { config: { switchThresholdMs: 200 } })
-check('改别的字段不会丢掉 skin', () => assert.equal(others.payload.value.config.skin, 'taiji'))
-await call('config', { config: { skin: 'ring' } })
+check('改别的字段不会丢掉 skin', () => assert.equal(others.payload.value.config.skin, 'afterglow'))
+await call('config', { config: { skin: 'ring-core' } })
+
+console.log('== showUi 开关 ==')
+const uiOff = await call('config', { config: { showUi: false } })
+check('showUi:false 被接受', () => assert.equal(uiOff.payload.value.config.showUi, false))
+const uiOn = await call('config', { config: { showUi: true } })
+check('showUi:true 被接受', () => assert.equal(uiOn.payload.value.config.showUi, true))
 
 console.log('== 候选轮间隔是推导值，不可单独配置 ==')
 const ivr2 = await call('config', { config: { candidateConcurrency: 2 } })
