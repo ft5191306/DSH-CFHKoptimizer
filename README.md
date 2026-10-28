@@ -1,8 +1,10 @@
 # dsh-cf-pin — 优选线路
 
 持续测量 `open-design.ai` 这条链路上的 Cloudflare 边缘 IP，链路劣化时自动改写
-`hosts` 的优选段。这是 [`cf_pin.py`](../../../Desktop/open-design-ip-optimizer-main/cf_pin.py)
-的常驻化版本——`cf_pin.py` 保留为手动逃生通道。
+`hosts` 的优选段。
+
+这个插件是同一份测量策略的**常驻化版本**：原来的手动脚本 `cf_pin.py` 保留为
+手动逃生通道（需要从头扫一遍、或怀疑候选池本身时用它）。
 
 ## 为什么需要它
 
