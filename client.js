@@ -9,12 +9,15 @@
  *
  * 状态一律以 /state 快照为准，前端不拼状态。
  *
- * 视觉纪律：
- *  - 条长 = 延迟量级（60ms 起跳，760ms 顶满），颜色只做第二通道；
- *  - 当前是实心条，候选是空心轨 + 半透明填充，过期的候选换成斜线纹理；
- *  - 没有数据就是空轨，不做假读数；
- *  - hosts 真的换了 IP 时，一枚亮条从候选格滑进当前格，同时当前格扩散一圈；
- *  - `prefers-reduced-motion` 下所有位移与循环动画停掉，只留状态色。
+ * 视觉纪律（已随「一颗图标读两侧」定稿）：
+ *  - 形状读两侧延迟：左半 / 实心 = 当前线路，右半 / 空心 = 候选线路；
+ *    辐条按点亮圈数读速度，太极按边缘侵蚀读延迟，颜色只做第二通道；
+ *  - 没有数据就是空轨 / 最小侵蚀，不做假读数；
+ *  - 动效各代表一个真事件，一个都不能是装饰：待机慢转（还活着）、
+ *    抖动分档（更差的那侧有多差）、测速旋转→刹车 360° 整数倍（在测）、
+ *    换线亮条横扫 + 180° 急转（刚换了 IP）、流式呼吸（模型正在输出）、
+ *    结束扩散环（回复收尾）、受阻慢呼吸（要你动手）；
+ *  - `prefers-reduced-motion` 下所有位移与循环动画停掉，只留状态色与形状。
  */
 
 window.__ModuleLoader__.load({
@@ -28,8 +31,6 @@ window.__ModuleLoader__.load({
     const FLASH_MS = 320
     /** 换线动画在屏幕上停留的时长；飞行本身 520ms，留一点余量给收尾。 */
     const SWAP_MS = 640
-    /** 回复结束时完成环的时长，与 CSS 里的 .9s 对齐。 */
-    const COMPLETE_MS = 940
     /** 本包名。详情页的 slot 会为所有插件派发，门禁要靠它认自己。 */
     const PACKAGE_NAME = '@local/dsh-cf-pin'
 
@@ -272,7 +273,8 @@ window.__ModuleLoader__.load({
 .cfp-cluster{position:relative;display:inline-flex;align-items:center;gap:8px;
   padding:2px 0;line-height:0}
 /* 告警文字：只在需要用户动手时出现（权限 / 上限 / 断网等）。
-   刻意做小、做淡——它是提示不是警告弹窗，不能盖过点阵本身。 */
+   刻意做小、做淡——它是提示不是警告弹窗，不能盖过图标本身。 */
+@keyframes cfp-warn-in{from{opacity:0;transform:translateX(-3px)}to{opacity:1;transform:none}}
 .cfp-warn{flex:none;font-size:11.5px;line-height:16px;letter-spacing:.01em;
   color:var(--dsw-alias-state-warn-primary);white-space:nowrap;
   animation:cfp-warn-in .22s ease both}
@@ -280,31 +282,23 @@ window.__ModuleLoader__.load({
 /* 断网用中性色：这不是插件的错，用户也没法通过插件解决。 */
 .cfp-cluster.is-dead .cfp-warn{color:var(--dsw-alias-label-tertiary)}
 .cfp-cluster.is-alert .cfp-warn{color:var(--dsw-alias-state-error-primary,#d9534f)}
-@keyframes cfp-warn-in{from{opacity:0;transform:translateX(-3px)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion:reduce){.cfp-warn{animation:none}}
+/* 减少动效：必须用 !important。.cfp-warn.is-probe 特异性 0,2,0 且写在后面，
+   媒体查询本身不提升特异性——原写法压不住它，测速提示仍在做位移淡入。 */
+
 /* 断网 / 全劣化：整颗图标压暗或缓慢明暗，表示真的慢。 */
 .cfp-cluster.is-dead .cfp-skin{opacity:.5}
 .cfp-cluster.is-dim{opacity:.55}
-.cfp-cluster.is-alert .cfp-skin{animation:cfp-alert 2.4s ease-in-out infinite}
 .cfp-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
   clip-path:inset(50%);white-space:nowrap;border:0}
-.cfp-dot{flex:none;width:6px;height:6px;border-radius:50%;
-  background:var(--dsw-alias-label-tertiary,#8b8f96)}
-.cfp-dot.is-ok{background:var(--dsw-alias-state-success-primary)}
-.cfp-dot.is-work{background:var(--dsw-alias-state-business-primary)}
-.cfp-dot.is-warn{background:var(--dsw-alias-state-warn-primary)}
 .cfp-text{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cfp-chev{flex:none;margin-left:auto;display:inline-flex;align-items:center;
   color:var(--dsw-alias-label-tertiary,#8b8f96);transition:transform .18s ease}
 .cfp-chev.is-open{transform:rotate(90deg)}
 .cfp-mono{font-family:var(--dsh-font-family-code-default,ui-monospace,Consolas,monospace);font-size:11.5px}
-.cfp-muted{color:var(--dsw-alias-label-tertiary)}
-
 .cfp-page{box-sizing:border-box;max-width:760px;padding:16px 20px 28px;
   color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.55}
 .cfp-statusRow{display:flex;align-items:center;gap:8px;margin:0 0 10px;
   font-size:15px;line-height:22px}
-.cfp-statusRow .cfp-dot{width:7px;height:7px}
 .cfp-facts{display:grid;grid-template-columns:82px minmax(0,1fr);gap:6px 12px;
   margin:0 0 4px;font-size:12.5px;line-height:18px}
 .cfp-facts dt{color:var(--dsw-alias-label-tertiary)}
@@ -379,20 +373,27 @@ window.__ModuleLoader__.load({
   color:var(--dsw-alias-label-secondary)}
 .cfp-summary .cfp-text{white-space:normal}
 .cfp-summaryTail{margin-left:auto;flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary)}
-@keyframes cfp-breathe{0%,100%{opacity:.4}50%{opacity:.9}}
-@keyframes cfp-wave{0%,100%{opacity:.16;transform:scale(.84)}50%{opacity:.95;transform:scale(1.14)}}
-@keyframes cfp-throb{0%,100%{transform:scale(1)}50%{transform:scale(1.32)}}
-@keyframes cfp-punch{0%{transform:scale(1)}38%{transform:scale(1.17)}100%{transform:scale(1)}}
-@keyframes cfp-complete{0%{opacity:.95;transform:scale(.24)}70%{opacity:.45}
-  100%{opacity:0;transform:scale(1)}}
-@keyframes cfp-hold{0%,100%{opacity:.42}50%{opacity:.74}}
-@keyframes cfp-ready{0%,52%,100%{opacity:.78}68%{opacity:1}}
-@keyframes cfp-alert{0%,100%{opacity:.5}50%{opacity:1}}
-@keyframes cfp-arrive{0%{transform:scale(.93);opacity:.55}58%{transform:scale(1.07)}
-  100%{transform:scale(1);opacity:1}}
-@keyframes cfp-handoff{0%{opacity:0;transform:translate3d(64.2px,0,0) scale(.7)}
-  16%{opacity:.95}74%{opacity:.95;transform:translate3d(12px,0,0) scale(1.15)}
-  100%{opacity:0;transform:translate3d(1.2px,0,0) scale(.7)}}
+/* ---- 动效关键字：每一条都在下面「动效接线」里被真实引用，一个都不许剩 ---- */
+/* 流式呼吸：模型正在输出。图标整体明暗，不位移——它不该抢注意力。 */
+
+/* 流式扩散波：从图标向外扩一圈，颜色取候选档位（--cfp-tone）。 */
+
+/* 候选更快：候选侧的一次性脉动，提示「可以挪了」。 */
+
+/* 换线落地：当前侧被敲一下，确认「新的当前已经生效」。 */
+
+/* 回复收尾：一圈从中心扩散到消失（0.94s，与 COMPLETE_MS 对齐）。 */
+
+/* 受阻慢呼吸：需要你动手（提权 / 明天再来），所以慢，不催。 */
+
+/* 就绪提示：候选已测到且明显更快，环上的一次「亮了」的提示。 */
+
+
+/* 出场：图标第一次拿到读数时落位，从略小淡入到正常。 */
+
+/* 换线亮条：从候选侧（右）横扫到当前侧（左）。几何按 25px 图标重算——
+   原稿是 64.2px→1.2px 的三格点阵坐标，单图标下不再适用。 */
+
 /* ============ 皮肤：一颗图标同时表达「当前」与「候选」 ============
    两套皮肤的契约一致：左半 = 当前线路，右半 = 候选线路，各自按自己的延迟
    变化，互不干扰。所以它们不再是三格，而是一颗。显示尺寸 25px。 */
@@ -425,103 +426,353 @@ window.__ModuleLoader__.load({
   color:var(--dsw-alias-label-primary,#e7f0eb)}
 .cfp-skinDesc{font-size:11px;line-height:15px;
   color:var(--dsw-alias-label-tertiary,#8b8f96)}
-.cfp-skin{display:block;flex:none;overflow:visible;width:25px;height:25px;
-  /* transform-box 必须显式给：SVG 元素的默认变换基准与 HTML 不同，
-     不写的话 rotate 可能绕画布左上角转，而不是绕图标中心。 */
-  transform-box:view-box;transform-origin:center}
-/* ---- 测速：分段旋转（与设计稿 spinWhile 一致）----
-   原来只有缩放到 0.94 的脉冲，缺少真正的旋转，看起来像「在呼吸」而不是「在测速」。
-   设计稿是四段：
-     起步加速 600ms → 匀速高速 620ms/圈 → 刹车 1400ms → 停在 180° 整数倍
-   这里用 CSS 三条动画接力（CSS 无法读当前角度做接力，所以用两段常速 + 一段减速，
-   并由 JS 在测速结束时切到「刹车」状态）。 */
-/* 测速期间的旋转由外层 .cfp-skin 负责（两种皮肤通用）。
-   太极内部还有一层待机 60s 慢转，必须让位，否则会叠成「转两遍、速度打架」。 */
-.cfp-cluster.is-busy .cfp-skin{animation:cfp-spin-up .6s cubic-bezier(.45,0,.85,.45) 1,
-  cfp-spin-loop .62s linear .6s infinite}
-.cfp-cluster.is-busy .cfp-taiji .t-motion,
-.cfp-cluster.is-busy .cfp-taiji[data-tier='poor'] .t-tremor,
-.cfp-cluster.is-busy .cfp-taiji[data-tier='fair'] .t-tremor{animation:none}
-/* 刹车：测速收尾时把 loop 换成一次缓停。用 data-probe 标记阶段。 */
-.cfp-cluster.is-busy[data-probe-phase='brake'] .cfp-skin{
-  animation:cfp-spin-brake 1.4s cubic-bezier(.08,.62,.22,1) 1 both}
-@keyframes cfp-spin-up{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-@keyframes cfp-spin-loop{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-@keyframes cfp-spin-brake{
-  from{transform:rotate(0deg)}
-  to{transform:rotate(540deg)}}
-/* 交接旋转只给辐条：太极内部有自己的 .t-spin 层，
-   两条规则同时命中会让它转两次（变成 360° 且节奏被两段动画争抢）。 */
-.cfp-cluster.is-swap .cfp-spokes{animation:cfp-handoff-spin .56s cubic-bezier(.55,0,.15,1)}
-
-/* ---- 辐条（circle 02）：点从中心沿 10 根辐条向外点亮 ---- */
-.cfp-spoke-base{fill:var(--dsw-alias-label-tertiary,#8b8f96);opacity:.28}
-.cfp-spoke-lit{transition:opacity .26s ease,fill .55s ease}
-/* 候选读数是借来的（启动时还没测速）：整体压淡，表明「这不是测出来的数」。 */
+/* 图标容器：25px，皮肤 SVG 填满它。
+   注意：宿主**不**在这里施加旋转。两套新皮肤的测速动效都在字形内部完成
+   （环芯是读头沿环扫过、余温是中心向外的亮度波），旋转整枚图标会与它们叠加。 */
+.cfp-glyph{display:block;flex:none;width:25px;height:25px;line-height:0}
+/* 装饰层用的状态色变量：只做第二通道，主通道是皮肤自带的四档色相。 */
+.cfp-cluster{--cfp-tone:var(--dsw-alias-state-business-primary)}
+/* 四档色相直接绑定宿主的语义状态色。
+   宿主 token 自己会在明暗主题间翻转（requiresLightAndDark），
+   所以这里不需要猜 [data-theme] 之类的选择器，也就没有
+   「主题标记猜错 → 亮色值画在深底上」的风险。
+   这同时也是四档的唯一来源：值始终存在，不存在「变量未定义导致
+   fill 声明无效、SVG 退回黑色」的失败模式。 */
+/* 四档色相直接绑定宿主的语义状态色。
+   宿主 token 自己会在明暗主题间翻转（requiresLightAndDark），
+   所以这里不需要猜 [data-theme] 之类的选择器，也就没有
+   「主题标记猜错 → 亮色值画在深底上」的风险。
+   这同时也是四档的唯一来源：值始终存在，不存在「变量未定义导致
+   fill 声明无效、SVG 退回黑色」的失败模式。 */
+.cfp-cluster{
+  --v-exc:var(--dsw-alias-state-success-primary,#2f8f5b);
+  --v-good:var(--dsw-alias-state-business-primary,#2f6fd0);
+  --v-fair:var(--dsw-alias-state-warn-primary,#b5761f);
+  --v-poor:var(--dsw-alias-state-error-primary,#c3433a);
+}
+/* 过期的候选读数：图标压到「不作数」的亮度，靠形状不再暗示快。
+   属性与类是同一条语义的两个通道，这里都点名，避免某一侧漏掉。 */
+.cfp-cluster.is-stale .cfp-skin,
+.cfp-dock[data-stale='1'] .cfp-skin{opacity:.6}
+/* 借用值压淡：同上，data-borrowed 是属性通道。 */
+.cfp-dock[data-borrowed='1'] .cfp-skin{opacity:.72}
+.cfp-dock[data-probing='1'] .cfp-skinBtn{cursor:progress}
+.cfp-dock[data-probing='1'] .cfp-skinBtn:hover{background:transparent}
+.cfp-dock[data-warn]:not([data-warn='']) .cfp-cluster{gap:10px}
+/* 太极在 25px 下的描边补偿：属性通道确认是太极才加，避免影响辐条。 */
+.cfp-dock[data-skin='taiji'] .cfp-glyph{shape-rendering:geometricPrecision}
+/* 候选读数是借来的（启动时还没测速）：整体压淡，表明「这不是测出来的数」。
+   眼睛倍睁必须用 !important：组件把 --cfp-eye 内联在同一元素上，而行内声明
+   只有在样式表声明带 !important 时才会被压过。原来不带 !important，那条是死的。 */
 .cfp-cluster.is-borrowed .cfp-skin{opacity:.72}
-.cfp-cluster.is-borrowed .cfp-taiji{--cfp-eye:1}
+/* 配置页状态圆点：与横幅无关，是设置页自己的状态指示。 */
+.cfp-dot{flex:none;width:6px;height:6px;border-radius:50%;
+  background:var(--dsw-alias-label-tertiary,#8b8f96)}
+.cfp-dot.is-ok{background:var(--dsw-alias-state-success-primary)}
+.cfp-dot.is-work{background:var(--dsw-alias-state-business-primary)}
+.cfp-dot.is-warn{background:var(--dsw-alias-state-warn-primary)}
+.cfp-statusRow .cfp-dot{width:7px;height:7px}
 
-/* ---- 太极（circle2）：实心=当前，空心=候选；两侧各自被延迟侵蚀 ----
-   显示尺寸 25px、viewBox 64 —— 比例约 0.39。设计稿在 25px 下就是这套描边值，
-   所以这里**不要**按 25 再缩一遍：CSS 的 stroke-width 作用在 viewBox 坐标系里，
-   缩放由外层 width 完成。 */
-.cfp-taiji .t-ink{stroke:var(--cfp-ink,var(--dsw-alias-label-primary,#e7f0eb))}
-.cfp-taiji .t-outline{fill:none;stroke-width:2.6}
-.cfp-taiji .t-s{fill:none;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
-.cfp-taiji .t-half-l{fill:var(--cfp-ink,var(--dsw-alias-label-primary,#e7f0eb))}
-.cfp-taiji .t-half-r{fill:transparent}
-.cfp-taiji .t-eye{transform-box:fill-box;transform-origin:center;
-  transform:scaleY(var(--cfp-eye,1));transition:transform .32s ease}
-.cfp-taiji .t-eye-disc{transition:fill .32s ease}
-.cfp-taiji .t-eye-top .t-eye-disc{fill:var(--cfp-plate,var(--dsw-alias-bg-layer-1,#16161a))}
-.cfp-taiji .t-eye-bottom .t-eye-disc{fill:var(--cfp-ink,var(--dsw-alias-label-primary,#e7f0eb))}
-.cfp-taiji .t-half,.cfp-taiji .t-eye-disc{transition:fill .32s ease}
+/* ==========================================================================
+   dsh-cf-pin 图标皮肤：ring-core（环芯）/ afterglow（余温）
+   ---------------------------------------------------------------------------
+   契约：一个 25×25 的点阵图形同时承载「当前」与「候选」，零文字。
+   皮肤只消费宿主已发出的钩子，不含业务判断：
 
-/* 三层动效容器必须用 view-box 作为变换基准，否则 rotate 会绕错点。 */
-.cfp-taiji .t-motion,
-.cfp-taiji .t-tremor,
-.cfp-taiji .t-spin{transform-box:view-box;transform-origin:50% 50%}
+     .is-busy           测速中（配 [data-probe-phase] 区分 spin / brake）
+     .is-swap .is-donor 换线帧（1500ms 一次性）
+     .is-arriving       首次落位
+     .is-blocked .is-held  慢呼吸（要你动手，不催）
+     .has-better        候选更快，脉动
+     .is-alert 或 [data-state=all-degraded]  全劣化明暗
+     .is-dead .is-dim .is-stale [data-borrowed=1]  静态降权
 
-/* 待机：每分钟匀速一圈。设计稿的 idle-turn 是 60s，这里照抄——
-   慢到几乎察觉不到「在转」，但眼睛会发现它在动，这就是待机感。 */
-.cfp-taiji .t-motion{animation:cfp-idle-turn 60s linear infinite}
-/* 抖动按「两侧里更差的那一档」决定强度：差档肉眼可见，中档缓慢。 */
-.cfp-taiji[data-tier='poor'] .t-tremor{animation:cfp-tremor .14s steps(2,end) infinite}
-.cfp-taiji[data-tier='fair'] .t-tremor{animation:cfp-tremor-soft 3.4s ease-in-out infinite}
-/* 交接：一次 180° 急转；转的时候停掉待机转和抖动，避免叠成一团。 */
-.cfp-cluster.is-swap .cfp-taiji .t-spin{
-  animation:cfp-handoff-spin .56s cubic-bezier(.55,0,.15,1) both}
-.cfp-cluster.is-swap .cfp-taiji .t-motion,
-.cfp-cluster.is-swap .cfp-taiji[data-tier='poor'] .t-tremor,
-.cfp-cluster.is-swap .cfp-taiji[data-tier='fair'] .t-tremor{animation:none}
+   三套调色板（潮汐 / 鸢尾 / 苔原）只换 8 个变量。当前插件内置「潮汐」，
+   其余两套保留在 UI-SPEC 里作为可选主题；换色只改下面的默认值，
+   几何与动效不受影响。
+   ========================================================================== */
 
-@keyframes cfp-idle-turn{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-@keyframes cfp-tremor{
-  0%,100%{transform:translate(0,0) rotate(0)}
-  25%{transform:translate(-1.6px,.6px) rotate(-1.5deg)}
-  50%{transform:translate(1.3px,-.4px) rotate(1.1deg)}
-  75%{transform:translate(-.6px,-.8px) rotate(-.9deg)}}
-@keyframes cfp-tremor-soft{
-  0%,100%{transform:translateY(0)}
-  50%{transform:translateY(.7px) rotate(.4deg)}}
+/* 25px：嵌在输入框里，尺寸变了会挤坏布局。 */
+.cfp-skin{display:block;flex:none;width:25px;height:25px;overflow:visible}
 
-@keyframes cfp-handoff-spin{
-  0%{transform:rotate(0deg) scale(1)}
-  58%{transform:rotate(190deg) scale(1.06)}
-  100%{transform:rotate(180deg) scale(1)}}
+/* ===== 皮肤一：环芯 ring-core ===== */
+/* ==========================================================================
+   2. 皮肤 · 环芯 ring-core / 潮汐 TIDE
+   外圈 16 点 = 候选（角度覆盖），内芯 5 点 = 当前（点亮数）。
+   三个变体只换颜色；几何、档位映射、动效时长逐字节相同。
+   测速不旋转整枚图标：读头与刹车都发生在字形内部的 cfp-probe 子层。
+   ========================================================================== */
+.cfp-ring-core .k{fill:var(--dsw-alias-label-primary,#eef0f3)}
+.cfp-ring-core .k.tp-excellent{fill:var(--v-exc)}
+.cfp-ring-core .k.tp-good{fill:var(--v-good)}
+.cfp-ring-core .k.tp-fair{fill:var(--v-fair)}
+.cfp-ring-core .k.tp-poor{fill:var(--v-poor)}
+.cfp-ring-core .g{fill:var(--dsw-alias-label-tertiary,#8b9199);opacity:.55}
+.cfp-ring-core circle{transform-box:fill-box;transform-origin:50% 50%}
+.cfp-ring-core .cfp-side-cand,
+.cfp-ring-core .cfp-side-cur{transform-box:view-box;transform-origin:50% 50%}
 
-@media (prefers-reduced-motion: reduce){
-  .cfp-chev,.cfp-switch,.cfp-switch::after,.cfp-derive{transition:none}
-  .cfp-skin,.cfp-skinBtn,.cfp-cluster.is-busy .cfp-skin,
-  .cfp-cluster.is-swap .cfp-skin,.cfp-cluster.is-alert .cfp-skin,
-  .cfp-cluster.is-swap .cfp-spokes,
-  /* 太极的三层动效全部停掉：待机转、抖动、交接急转。 */
-  .cfp-taiji .t-motion,.cfp-taiji .t-tremor,.cfp-taiji .t-spin,
-  .cfp-taiji[data-tier='poor'] .t-tremor,
-  .cfp-taiji[data-tier='fair'] .t-tremor{
-    animation:none!important;transition:none!important}
-  .cfp-taiji .t-eye{transition:none}
-}`
+/* ---- 静态钩子：过期压暗 / 整图降权 ----
+   档位色相已经承担“哪一档”，候选侧不再换色，只靠 has-better 的脉动催促。 */
+.cfp-cluster.is-stale .cfp-ring-core .cfp-side-cand,
+.cfp-dock[data-stale="1"] .cfp-ring-core .cfp-side-cand,
+.cfp-cluster.is-borrowed .cfp-ring-core .cfp-side-cand,
+.cfp-dock[data-borrowed="1"] .cfp-ring-core .cfp-side-cand{opacity:.4}
+.cfp-cluster.is-dim .cfp-ring-core,
+.cfp-dock[data-state="probe-failed"] .cfp-ring-core{opacity:.55}
+.cfp-cluster.is-dead .cfp-ring-core,
+.cfp-dock[data-state="offline"] .cfp-ring-core{opacity:.45}
+
+/* ---- 测速浮层：一圈 8 点的读头 + 尾迹，默认不可见 ---- */
+.cfp-ring-core .cfp-probe{opacity:0}
+.cfp-ring-core .cfp-probe .w{fill:var(--dsw-alias-label-primary,#eef0f3)}
+.cfp-ring-core .cfp-probe-brake,
+.cfp-ring-core .cfp-probe-rotor{transform-box:view-box;transform-origin:50% 50%}
+
+/* ---- 动效 ---- */
+@keyframes cfp01-in{
+  0%{transform:scale(.2)}
+  62%{transform:scale(1.08)}
+  100%{transform:scale(1)}}
+@keyframes cfp01-hold{0%,100%{opacity:.52}50%{opacity:1}}
+@keyframes cfp01-better{
+  0%,100%{opacity:1;transform:scale(1)}
+  50%{opacity:.62;transform:scale(1.055)}}
+@keyframes cfp01-alert{0%,100%{opacity:.5}50%{opacity:1}}
+@keyframes cfp01-core{0%,100%{transform:scale(.94)}50%{transform:scale(1.06)}}
+@keyframes cfp01-spin-up{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes cfp01-spin-loop{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes cfp01-brake{0%{transform:rotate(0deg)}100%{transform:rotate(150deg)}}
+@keyframes cfp01-probe-out{0%,52%{opacity:1}100%{opacity:0}}
+@keyframes cfp01-dim{0%{opacity:1}100%{opacity:.34}}
+@keyframes cfp01-revive{0%{opacity:.34}100%{opacity:1}}
+@keyframes cfp01-handoff-move{
+  0%{transform:translate(0,0) scale(1)}
+  14%{transform:translate(0,0) scale(.78)}
+  62%{transform:translate(var(--tx),var(--ty)) scale(.46)}
+  74%{transform:translate(var(--tx),var(--ty)) scale(.46)}
+  76%{transform:translate(0,0) scale(.78)}
+  100%{transform:translate(0,0) scale(1)}}
+@keyframes cfp01-handoff-fade{
+  0%{opacity:1}
+  14%{opacity:1}
+  62%{opacity:0}
+  75%{opacity:0}
+  100%{opacity:1}}
+@keyframes cfp01-take2{
+  0%{transform:scale(1)}
+  36%{transform:scale(1.3)}
+  68%{transform:scale(.96)}
+  100%{transform:scale(1)}}
+
+/* arrive · ≤500 ms · 21 点依次落位（末点 280 + 200 = 480 ms） */
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle,
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cur circle{animation:cfp01-in .2s cubic-bezier(.2,.7,.3,1) both}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(2){animation-delay:14ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(3){animation-delay:28ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(4){animation-delay:42ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(5){animation-delay:56ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(6){animation-delay:70ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(7){animation-delay:84ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(8){animation-delay:98ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(9){animation-delay:112ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(10){animation-delay:126ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(11){animation-delay:140ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(12){animation-delay:154ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(13){animation-delay:168ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(14){animation-delay:182ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(15){animation-delay:196ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cand circle:nth-child(16){animation-delay:210ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cur circle:nth-child(1){animation-delay:224ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cur circle:nth-child(2){animation-delay:238ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cur circle:nth-child(3){animation-delay:252ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cur circle:nth-child(4){animation-delay:266ms}
+.cfp-cluster.is-arriving .cfp-ring-core .cfp-side-cur circle:nth-child(5){animation-delay:280ms}
+
+/* blocked / held · 2.8 s 慢呼吸，只动 opacity */
+.cfp-cluster.is-blocked .cfp-ring-core,
+.cfp-cluster.is-held .cfp-ring-core{animation:cfp01-hold 2.8s ease-in-out infinite}
+/* has-better · 1.7 s，只脉动候选侧 */
+.cfp-cluster.has-better .cfp-ring-core .cfp-side-cand{animation:cfp01-better 1.7s ease-in-out infinite}
+/* alert · 2.4 s 明暗循环 */
+.cfp-cluster.is-alert .cfp-ring-core,
+.cfp-dock[data-state="all-degraded"] .cfp-ring-core{animation:cfp01-alert 2.4s ease-in-out infinite}
+/* switch · 1500 ms 单次 · 候选外环上点亮的点依次沉入内芯，内芯接住后外环重新积聚。
+   每一颗亮点的 --tx/--ty 指向最近的芯位；末点 300 + 1200 = 1500 ms。 */
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core,
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core *{animation:none}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand .k{animation:cfp01-handoff-move 1.2s cubic-bezier(.4,.05,.2,1) both,
+  cfp01-handoff-fade 1.2s cubic-bezier(.4,.05,.2,1) both}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(2){animation-delay:20ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(3){animation-delay:40ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(4){animation-delay:60ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(5){animation-delay:80ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(6){animation-delay:100ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(7){animation-delay:120ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(8){animation-delay:140ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(9){animation-delay:160ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(10){animation-delay:180ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(11){animation-delay:200ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(12){animation-delay:220ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(13){animation-delay:240ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(14){animation-delay:260ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(15){animation-delay:280ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cand circle:nth-child(16){animation-delay:300ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cur circle{animation:cfp01-take2 .68s cubic-bezier(.2,.75,.3,1) both}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cur circle:nth-child(1){animation-delay:500ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cur circle:nth-child(2){animation-delay:564ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cur circle:nth-child(3){animation-delay:628ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cur circle:nth-child(4){animation-delay:692ms}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-ring-core .cfp-side-cur circle:nth-child(5){animation-delay:756ms}
+
+/* probe 优先：测速期间常驻循环一律让位（放在 switch 之后，靠多一个 .cfp-skin 压住） */
+.cfp-cluster.is-busy .cfp-skin.cfp-ring-core{animation:none;transition:none}
+.cfp-cluster.is-busy .cfp-skin.cfp-ring-core .cfp-side-cand,
+.cfp-cluster.is-busy .cfp-skin.cfp-ring-core .cfp-side-cur,
+.cfp-cluster.is-busy .cfp-skin.cfp-ring-core .cfp-side-cand *,
+.cfp-cluster.is-busy .cfp-skin.cfp-ring-core .cfp-side-cur *{animation:none;transition:none}
+/* probe-spin · 读头在环上跑：600 ms 加速 → 620 ms/圈，整枚图标不动 */
+.cfp-cluster.is-busy:is([data-probe-phase="spin"],[data-probe-phase="brake"]) .cfp-ring-core .cfp-probe-rotor{
+  animation:cfp01-spin-up .6s cubic-bezier(.45,0,.85,.45) 1,
+    cfp01-spin-loop .62s linear .6s infinite}
+.cfp-cluster.is-busy[data-probe-phase="spin"] .cfp-ring-core .cfp-probe{opacity:1}
+.cfp-cluster.is-busy[data-probe-phase="spin"] .cfp-ring-core .cfp-side-cand,
+.cfp-cluster.is-busy[data-probe-phase="spin"] .cfp-ring-core .cfp-side-cur{animation:cfp01-dim .28s ease-out both}
+.cfp-cluster.is-busy:is([data-probe-phase="spin"],[data-probe-phase="brake"]) .cfp-ring-core .cfp-side-cur circle{
+  animation:cfp01-core .62s ease-in-out infinite}
+/* probe-brake · 1400 ms · 读头停在当前帧，由外层接着转 150° 减速；浮层收掉，主图复活 */
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-ring-core .cfp-probe-rotor{animation-play-state:paused}
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-ring-core .cfp-side-cur circle{animation-play-state:paused}
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-ring-core .cfp-probe-brake{animation:cfp01-brake 1.4s cubic-bezier(.1,.55,.2,1) both}
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-ring-core .cfp-probe{animation:cfp01-probe-out 1.4s cubic-bezier(.3,0,.4,1) both}
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-ring-core .cfp-side-cand,
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-ring-core .cfp-side-cur{animation:cfp01-revive 1.4s cubic-bezier(.08,.62,.22,1) both}
+
+}
+
+/* ===== 皮肤二：余温 afterglow ===== */
+/* ==========================================================================
+   2. 皮肤 · 余温 afterglow / 潮汐 TIDE
+   点阵位置永远不动：光晕铺到第几圈 = 候选，中心多亮 = 当前。
+   每一侧按自己的档位取色（tp-*），亮度与半径仍读两个值。
+   测速不旋转整枚图标：波纹与刹车都在字形内部的 cfp-probe 子层。
+   ========================================================================== */
+.cfp-afterglow .k{fill:var(--dsw-alias-label-primary,#eef0f3)}
+.cfp-afterglow .tp-excellent .k{fill:var(--v-exc)}
+.cfp-afterglow .tp-good .k{fill:var(--v-good)}
+.cfp-afterglow .tp-fair .k{fill:var(--v-fair)}
+.cfp-afterglow .tp-poor .k{fill:var(--v-poor)}
+.cfp-afterglow .tp-nodata .k{fill:var(--dsw-alias-label-tertiary,#8b9199)}
+.cfp-afterglow .g{fill:var(--dsw-alias-label-tertiary,#8b9199)}
+.cfp-afterglow .cfp-side-cur,
+.cfp-afterglow .cfp-side-cand{transform-box:view-box;transform-origin:50% 50%}
+
+/* ---- 静态钩子：外两圈属于候选侧；整图降权 ---- */
+.cfp-cluster.is-stale .cfp-afterglow .cfp-side-cand,
+.cfp-dock[data-stale="1"] .cfp-afterglow .cfp-side-cand,
+.cfp-cluster.is-borrowed .cfp-afterglow .cfp-side-cand,
+.cfp-dock[data-borrowed="1"] .cfp-afterglow .cfp-side-cand{opacity:.35}
+.cfp-cluster.is-dim .cfp-afterglow,
+.cfp-dock[data-state="probe-failed"] .cfp-afterglow{opacity:.55}
+.cfp-cluster.is-dead .cfp-afterglow,
+.cfp-dock[data-state="offline"] .cfp-afterglow{opacity:.45}
+
+/* ---- 测速浮层：四圈波纹点，默认不可见 ---- */
+.cfp-afterglow .cfp-probe{opacity:0}
+.cfp-afterglow .cfp-probe .w{fill:var(--dsw-alias-label-primary,#eef0f3)}
+.cfp-afterglow .cfp-probe-settle{transform-box:view-box;transform-origin:50% 50%}
+
+/* ---- 动效 ---- */
+@keyframes cfp04-in{
+  0%{opacity:0;transform:scale(.86)}
+  72%{opacity:1;transform:scale(1.03)}
+  100%{opacity:1;transform:scale(1)}}
+@keyframes cfp04-hold{0%,100%{opacity:.52}50%{opacity:1}}
+@keyframes cfp04-better{
+  0%,100%{opacity:1;transform:scale(1)}
+  50%{opacity:.66;transform:scale(1.05)}}
+@keyframes cfp04-alert{0%,100%{opacity:.5}50%{opacity:1}}
+@keyframes cfp04-wave{
+  0%{opacity:0}
+  14%{opacity:1}
+  46%{opacity:.18}
+  100%{opacity:0}}
+@keyframes cfp04-drift{0%{transform:scale(1)}100%{transform:scale(1.14)}}
+@keyframes cfp04-fade{0%,55%{opacity:1}100%{opacity:0}}
+@keyframes cfp04-dim{0%{opacity:1}100%{opacity:.34}}
+@keyframes cfp04-revive{0%{opacity:.34}100%{opacity:1}}
+@keyframes cfp04-ext1{
+  0%{opacity:1}
+  16%{opacity:.06}
+  50%{opacity:.06}
+  68%{opacity:1}
+  100%{opacity:1}}
+@keyframes cfp04-ext2{
+  0%{opacity:1}
+  8%{opacity:.06}
+  66%{opacity:.06}
+  84%{opacity:1}
+  100%{opacity:1}}
+@keyframes cfp04-ext3{
+  0%{opacity:1}
+  14%{opacity:.06}
+  80%{opacity:.06}
+  100%{opacity:1}}
+@keyframes cfp04-flare{
+  0%,30%{filter:brightness(1)}
+  52%{filter:brightness(2.1)}
+  72%{filter:brightness(1.2)}
+  100%{filter:brightness(1)}}
+
+/* arrive · ≤500 ms */
+.cfp-cluster.is-arriving .cfp-afterglow .cfp-side-cur{animation:cfp04-in .44s cubic-bezier(.2,.7,.3,1) both}
+.cfp-cluster.is-arriving .cfp-afterglow .cfp-side-cand{animation:cfp04-in .44s cubic-bezier(.2,.7,.3,1) .04s both}
+/* blocked / held · 2.8 s 慢呼吸，只动 opacity */
+.cfp-cluster.is-blocked .cfp-afterglow,
+.cfp-cluster.is-held .cfp-afterglow{animation:cfp04-hold 2.8s ease-in-out infinite}
+/* has-better · 1.7 s，只脉动候选侧（外两圈） */
+.cfp-cluster.has-better .cfp-afterglow .cfp-side-cand{animation:cfp04-better 1.7s ease-in-out infinite}
+/* alert · 2.4 s 明暗循环 */
+.cfp-cluster.is-alert .cfp-afterglow,
+.cfp-dock[data-state="all-degraded"] .cfp-afterglow{animation:cfp04-alert 2.4s ease-in-out infinite}
+/* switch · 1500 ms 单次 · 外圈由外向内熄灭 → 内芯爆亮 → 由内向外重亮。全程不动位置。 */
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow,
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow *{animation:none}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow .cfp-r0{animation:cfp04-flare 1.5s cubic-bezier(.25,.6,.3,1) both}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow .cfp-r1{animation:cfp04-ext1 1.5s cubic-bezier(.3,0,.25,1) both}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow .cfp-r2{animation:cfp04-ext2 1.5s cubic-bezier(.3,0,.25,1) both}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow .cfp-r3{animation:cfp04-ext3 1.5s cubic-bezier(.3,0,.25,1) both}
+/* probe 优先：测速期间常驻循环一律让位 */
+.cfp-cluster.is-busy .cfp-skin.cfp-afterglow{animation:none;transition:none}
+.cfp-cluster.is-busy .cfp-skin.cfp-afterglow .cfp-side-cand,
+.cfp-cluster.is-busy .cfp-skin.cfp-afterglow .cfp-side-cur,
+.cfp-cluster.is-busy .cfp-skin.cfp-afterglow .cfp-side-cand *,
+.cfp-cluster.is-busy .cfp-skin.cfp-afterglow .cfp-side-cur *{animation:none;transition:none}
+/* probe-spin · 中心向外一圈圈亮起（1240 ms 一波），整枚图标不动 */
+.cfp-cluster.is-busy[data-probe-phase="spin"] .cfp-afterglow .cfp-probe{opacity:1}
+.cfp-cluster.is-busy:is([data-probe-phase="spin"],[data-probe-phase="brake"]) .cfp-afterglow .cfp-pw0{
+  animation:cfp04-wave 1.24s cubic-bezier(.4,0,.3,1) infinite}
+.cfp-cluster.is-busy:is([data-probe-phase="spin"],[data-probe-phase="brake"]) .cfp-afterglow .cfp-pw1{
+  animation:cfp04-wave 1.24s cubic-bezier(.4,0,.3,1) .12s infinite}
+.cfp-cluster.is-busy:is([data-probe-phase="spin"],[data-probe-phase="brake"]) .cfp-afterglow .cfp-pw2{
+  animation:cfp04-wave 1.24s cubic-bezier(.4,0,.3,1) .24s infinite}
+.cfp-cluster.is-busy:is([data-probe-phase="spin"],[data-probe-phase="brake"]) .cfp-afterglow .cfp-pw3{
+  animation:cfp04-wave 1.24s cubic-bezier(.4,0,.3,1) .36s infinite}
+.cfp-cluster.is-busy[data-probe-phase="spin"] .cfp-afterglow .cfp-side-cand,
+.cfp-cluster.is-busy[data-probe-phase="spin"] .cfp-afterglow .cfp-side-cur{animation:cfp04-dim .28s ease-out both}
+/* probe-brake · 1400 ms · 波形停在当前帧，整体向外散开并淡出 */
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-afterglow .cfp-probe-settle *{animation-play-state:paused}
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-afterglow .cfp-probe-settle{animation:cfp04-drift 1.4s cubic-bezier(.15,.6,.25,1) both}
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-afterglow .cfp-probe{animation:cfp04-fade 1.4s cubic-bezier(.3,0,.35,1) both}
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-afterglow .cfp-side-cand,
+.cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-afterglow .cfp-side-cur{animation:cfp04-revive 1.4s cubic-bezier(.08,.62,.22,1) both}
+
+}
+/* ---- 减少动效：一条规则关掉全部 ---- */
+@media (prefers-reduced-motion:reduce){
+  .cfp-skin,.cfp-skin *,.cfp-glyph{animation:none!important;transition:none!important}
+}
+`
 
     function Styles() {
       return h('style', { 'data-cf-pin': 'client' }, CSS)
@@ -597,308 +848,286 @@ window.__ModuleLoader__.load({
         unit ? h('span', { className: 'cfp-unit' }, unit) : null)
     }
 
-    // -------------------------------------------------------------- 横幅
+// ------------------------------------------------------ 皮肤渲染桥接
 
     /**
-     * composer 左上角的一枚网络状态图标。一个字的正文都没有：
-     * 形状说两侧延迟，动效说刚换没换线。读屏文案在 cfp-sr 里（视觉隐藏），
-     * 不违背「不要文字」。
+     * 两套皮肤都由纯函数生成一段 SVG 字符串。
      *
-     * 皮肤只剩两种：辐条（circle 的 02 方案）与太极（circle2 的小图标）。
-     * 三格点阵已按用户要求删除——它把「当前 / 流式 / 候选」摊成三个并排小图，
-     * 而这两套皮肤是「一颗图标同时读两侧」，后者更省地方，也更符合原设计。
-     */
-
-    /**
-     * 延迟 → 点亮程度（0–1）。380ms 及以内算「优秀」，点满一圈；
-     * 越慢点亮的外环越少，700ms 六颗、900ms 三颗、1200ms 只剩尖端。
-     */
-    function qualityOf(ms) {
-      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return 0
-      const stops = [[60, 0.96], [380, 0.78], [700, 0.55], [1000, 0.36], [1400, 0.12], [2000, 0.04]]
-      if (ms <= stops[0][0]) return stops[0][1]
-      for (let i = 1; i < stops.length; i += 1) {
-        const [x1, y1] = stops[i]
-        if (ms <= x1) {
-          const [x0, y0] = stops[i - 1]
-          return y0 + (y1 - y0) * ((ms - x0) / (x1 - x0))
-        }
-      }
-      return stops[stops.length - 1][1]
-    }
-
-    const TONE = {
-      good: 'var(--dsw-alias-state-success-primary)',
-      mid: 'var(--dsw-alias-state-warn-primary)',
-      // 曾经写的是 --dsw-alias-label-error：宿主题里没有这个变量（405 个已声明变量里
-      // 不含它），SVG fill 拿到未定义变量会退回**黑色**，于是「慢」的红色点阵在深色
-      // 背景上直接消失。真正存在的是 state-error-primary。
-      bad: 'var(--dsw-alias-state-error-primary,#d9534f)',
-    }
-
-    /** 分档只用来给不支持颜色插值的环境兜底，正常走 tintOf 的渐变。 */
-    function baseToneOf(ms) {
-      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return ''
-      if (ms <= 380) return 'good'
-      if (ms <= 900) return 'mid'
-      return 'bad'
-    }
-
-    /**
-     * 延迟 → 点阵颜色。380ms 及以内是「优秀」的绿，之后连续渐变到琥珀，
-     * 再往深里渐变到红——中间没有硬跳档，阈值只改渐变起点。
-     */
-    function tintOf(ms) {
-      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return ''
-      if (ms <= 380) return TONE.good
-      if (ms <= 900) {
-        const part = Math.round(((ms - 380) / (900 - 380)) * 100)
-        return 'color-mix(in oklab, ' + TONE.mid + ' ' + part + '%, ' + TONE.good + ')'
-      }
-      if (ms <= 1500) {
-        const part = Math.round(((ms - 900) / (1500 - 900)) * 100)
-        return 'color-mix(in oklab, ' + TONE.bad + ' ' + part + '%, ' + TONE.mid + ')'
-      }
-      return TONE.bad
-    }
-
-    /**
-     * 一颗点被点亮多少：质量越高，越外圈的点也开始亮。
+     * 为什么是字符串而不是 React 元素：皮肤是「怎么画」，是设计资产，
+     * 应该能被单独拷走、单独预览、单独改，不依赖宿主里的 React。
+     * 宿主只负责把字符串挂上去，并把 tier 算好传进来。
      *
-     * @param {number} quality 0–1
-     * @param {number} order 该点在第几圈（0 最内）
-     * @param {number} [span] 一个质量单位能点亮几圈。辐条只有 3 圈，
-     *   用原来同心环的 4.9 会在 380ms 就把三圈全点亮，所以这里按圈数收窄。
+     * 安全性：这些字符串完全由本文件的常量拼出（数值 + 固定类名），
+     * 不含任何外部输入，所以用 dangerouslySetInnerHTML 是安全的。
      */
-    function litOf(quality, order, span = 4.9) {
-      const t = Math.max(0, Math.min(1, quality * span - order))
-      return t * t * (3 - 2 * t)
-    }
 
-    // ------------------------------------------------------ 皮肤：单图标
+    /** TTFB 四档的唯一分档依据。皮肤不得自带阈值。 */
+    const TIER_EDGES = [380, 490, 600]
 
     /**
-     * 辐条点阵（来自 circle-matrix 的 02 方案）。
+     * 毫秒 → 档位名。
      *
-     * 左右各 5 根辐条、每根 3 颗点，加一颗圆心点：右半圆属于当前线路，
-     * 左半圆属于候选。延迟越好，点亮的圈数越多——读法与其他皮肤一致，
-     * 但形状是「向外放射」而不是「同心环」，在 25px 下更容易分辨方向。
-     *
-     * 坐标沿用设计稿的 30×30 坐标系（圆心 15,15）。
+     * @param {number | null} ms
+     * @returns {'excellent' | 'good' | 'fair' | 'poor' | 'nodata'}
      */
-    const SPOKE_DOTS = (() => {
-      // 右半：-72° 到 72°，等分 5 根；左半：108° 到 252°，同样 5 根。
-      // 两半各自对称，交接（左右互换）后形状仍然成立。
-      const spokes = { r: [-72, -36, 0, 36, 72], l: [108, 144, 180, 216, 252] }
-      const radii = [4.2, 7.7, 11.1]
-      const out = []
-      Object.keys(spokes).forEach((side) => {
-        spokes[side].forEach((deg) => {
-          radii.forEach((radius, ring) => {
-            const rad = (deg * Math.PI) / 180
-            out.push({
-              x: 15 + radius * Math.cos(rad),
-              y: 15 + radius * Math.sin(rad),
-              o: ring,
-              side,
-            })
-          })
-        })
-      })
-      // 圆心：算作最内一圈，两侧都会点亮它，读作「两条线共同的起点」。
-      out.push({ x: 15, y: 15, o: 0, side: 'c' })
-      return out
-    })()
-
-    /** 一个质量单位点亮几圈：辐条只有 3 圈。 */
-    const SPOKE_SPAN = 3.6
-
-    /** 辐条皮肤。25px 显示、30×30 坐标系（与设计稿一致）。 */
-    function SpokeIcon({ curQuality, bestQuality, curMs, bestMs }) {
-      const dots = []
-      SPOKE_DOTS.forEach((dot, index) => {
-        // 设计稿约定：左半 = 当前线路，右半 = 候选（与 circle-matrix 一致）。
-        // 圆心两侧共用：取更好的一侧，避免两条线都在圆心处变暗。
-        const isCurrent = dot.side === 'l'
-        const quality = dot.side === 'c'
-          ? Math.max(curQuality, bestQuality)
-          : (isCurrent ? curQuality : bestQuality)
-        const ms = dot.side === 'c'
-          ? (curQuality >= bestQuality ? curMs : bestMs)
-          : (isCurrent ? curMs : bestMs)
-        const amount = litOf(quality, dot.o, SPOKE_SPAN)
-        const radius = dot.side === 'c' ? 1.15 : 1.02
-        dots.push(h('circle', {
-          key: 'b' + index,
-          className: 'cfp-spoke-base',
-          cx: dot.x.toFixed(2),
-          cy: dot.y.toFixed(2),
-          r: radius,
-        }))
-        dots.push(h('circle', {
-          key: 'l' + index,
-          className: 'cfp-spoke-lit',
-          cx: dot.x.toFixed(2),
-          cy: dot.y.toFixed(2),
-          r: (radius + 0.14 * amount).toFixed(2),
-          // 颜色必须走 style，不能写成 fill 属性。
-          // SVG 的表现属性**不接受 var()**（那只在 CSS 声明里成立），
-          // 传进去会被判为非法值并退回默认黑色——深色背景上等于隐形。
-          // 这是本项目栽过一次的同一类 bug（见 README 里 quaternary 那条）。
-          style: {
-            fill: tintOf(ms) || 'var(--dsw-alias-label-tertiary,#8b8f96)',
-            opacity: amount.toFixed(3),
-          },
-        }))
-      })
-      return h('svg', {
-        className: 'cfp-skin cfp-spokes',
-        viewBox: '0 0 30 30',
-        'aria-hidden': 'true',
-        focusable: 'false',
-      }, dots)
-    }
-
-    const TAIJI_LEFT_HALF = 'M32 2A15 15 0 0 1 32 32A15 15 0 0 0 32 62A30 30 0 0 1 32 2Z'
-    const TAIJI_RIGHT_HALF = 'M32 2A15 15 0 0 1 32 32A15 15 0 0 0 32 62A30 30 0 0 0 32 2Z'
-    const TAIJI_S = 'M32 2A15 15 0 0 1 32 32A15 15 0 0 0 32 62'
-    /** 外环拆成左右两条弧，才能让两侧按各自档位独立侵蚀。 */
-    const TAIJI_ARC_LEFT = 'M32 2A30 30 0 0 0 32 62'
-    const TAIJI_ARC_RIGHT = 'M32 2A30 30 0 0 1 32 62'
-
-    /** 延迟 → 四档（与皮肤原设计一致的阈值）。 */
-    function erodeTierOf(ms) {
-      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return 'poor'
-      if (ms <= 400) return 'excellent'
-      if (ms <= 500) return 'good'
-      if (ms <= 600) return 'fair'
+    function tierOf(ms) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return 'nodata'
+      if (ms <= TIER_EDGES[0]) return 'excellent'
+      if (ms <= TIER_EDGES[1]) return 'good'
+      if (ms <= TIER_EDGES[2]) return 'fair'
       return 'poor'
     }
 
+    /** 档位由好到差；`nodata` 表示「没有读数」。 */
+    const TIER_ORDER = { excellent: 0, good: 1, fair: 2, poor: 3, nodata: 4 }
+
     /**
-     * 侵蚀缺口：角度 + 半径。全部落在 150°–230° 一段，
-     * 左右两侧各用自己那份，所以两侧的破损互不影响。
+     * 两侧取更差的一档，挂到 `<svg data-tier>`。
+     * 两侧都没有读数时归入 `poor`——「什么都测不到」不该被画成「优」。
      */
-    const EROSION = {
-      excellent: [],
-      good: [[197, 5.2]],
-      fair: [[204, 4.6], [190, 3.6], [176, 2.8]],
-      poor: [[214, 11.2], [200, 8.6], [187, 6.6], [175, 5], [163, 3.8], [151, 2.8], [229, 3.2]],
+    function worseTier(a, b) {
+      const wa = TIER_ORDER[a] == null ? 4 : TIER_ORDER[a]
+      const wb = TIER_ORDER[b] == null ? 4 : TIER_ORDER[b]
+      const w = wa >= wb ? a : b
+      return w === 'nodata' ? 'poor' : w
     }
-    const EYE_OPEN = { excellent: 1, good: 0.78, fair: 0.5, poor: 0.2 }
 
-    function taijiMask(id, tier, mirrored) {
-      const holes = (EROSION[tier] || []).map(([deg, radius], index) => {
-        const angle = ((mirrored ? deg + 180 : deg) * Math.PI) / 180
-        return h('circle', {
-          key: 'h' + index,
-          cx: (32 + 30 * Math.cos(angle)).toFixed(2),
-          cy: (32 + 30 * Math.sin(angle)).toFixed(2),
-          r: radius,
-          fill: '#000',
-        })
-      })
-      return h('mask', {
-        id,
-        maskUnits: 'userSpaceOnUse',
-        x: 0,
-        y: 0,
-        width: 64,
-        height: 64,
-      }, h('rect', { width: 64, height: 64, fill: '#fff' }), holes)
-    }
+    /** 坐标中心：viewBox 25×25。 */
+    const SKIN_K = 12.5
 
     /**
-     * 遮罩 id 必须在组件的**整个生命周期内稳定**。
+     * 档位 → 宿主状态色。只给装饰层（流式波 / 完成环 / 换线亮条）做第二通道；
+     * 皮肤自身的四档色相由 CSS 变量 `--v-*` 负责，不从这里取。
+     */
+    const TONE_ORB = {
+      excellent: 'var(--dsw-alias-state-success-primary)',
+      good: 'var(--dsw-alias-state-business-primary)',
+      fair: 'var(--dsw-alias-state-warn-primary)',
+      poor: 'var(--dsw-alias-state-error-primary,#d9534f)',
+    }
+
+    function round2(value) {
+      return Math.round(value * 100) / 100
+    }
+
+    /** 一个点。`k` = 已点亮，`g` = 未点亮，`tp-<tier>` 决定色相。 */
+    function skinDot(x, y, r, className, style) {
+      return '<circle cx="' + round2(x) + '" cy="' + round2(y) + '" r="' + round2(r) +
+        '" class="' + className + '"' + (style ? ' style="' + style + '"' : '') + '/>'
+    }
+
+    // ---- 皮肤一：环芯 ring-core ----
+
+    const RING_N = 16
+    /** 外环点亮几颗 = 候选档位。16/12/8/4/0 是四等分的「角度覆盖」。 */
+    const RING_LIT = { excellent: 16, good: 12, fair: 8, poor: 4, nodata: 0 }
+    /** 内芯点亮几颗 = 当前档位（十字五点的中心 + 四臂）。 */
+    const CORE_LIT = { excellent: 5, good: 3, fair: 2, poor: 1, nodata: 0 }
+    const CORE_POS = [[0, 0], [0, -3.1], [0, 3.1], [-3.1, 0], [3.1, 0]]
+
+    /**
+     * 环芯：外圈 16 点 = 候选，内芯 5 点 = 当前。
      *
-     * 原实现每次渲染都 taijiUid += 1，于是每 4 秒的轮询刷新都会换一套 id。
-     * React 在提交阶段先更新 defs、再更新引用它的 g，中间那一瞬 g 还指向已被
-     * 移除的旧 mask；mask 引用不到就按「完全裁掉」处理——用户看到的就是
-     * 「图标一闪而过然后消失」。用 useRef 固定一个 id，重新渲染时不再变。
+     * 当前与候选是**同一个同心图形**的两层，不是左右拼接。
+     * 每颗外圈点还带一份指向最近芯位的位移向量（`--tx/--ty`），换线时由 CSS
+     * 把它们吸进圆心——位移数据在这里算好，CSS 只管播。
+     *
+     * @param {{ current: string, candidate: string }} options
+     * @returns {string}
      */
-    let taijiIdSeed = 0
+    function renderRingCore(options) {
+      const current = options.current
+      const candidate = options.candidate
+      const ring = []
+      const core = []
 
-    function useStableId() {
-      const ref = useRef(null)
-      if (ref.current === null) {
-        taijiIdSeed += 1
-        ref.current = 'cfp-taiji-' + taijiIdSeed
+      const n = RING_LIT[candidate] == null ? 0 : RING_LIT[candidate]
+      let acc = 0
+      for (let i = 0; i < RING_N; i += 1) {
+        acc += n
+        const lit = acc >= RING_N
+        if (lit) acc -= RING_N
+        const a = ((-90 + i * (360 / RING_N)) * Math.PI) / 180
+        const j = i % CORE_POS.length
+        const tx = CORE_POS[j][0] - 9.4 * Math.cos(a)
+        const ty = CORE_POS[j][1] - 9.4 * Math.sin(a)
+        ring.push(skinDot(
+          SKIN_K + 9.4 * Math.cos(a), SKIN_K + 9.4 * Math.sin(a),
+          lit ? 1.3 : 0.95,
+          lit ? 'k tp-' + candidate : 'g',
+          '--tx:' + round2(tx) + 'px;--ty:' + round2(ty) + 'px',
+        ))
       }
-      return ref.current
+
+      const cn = CORE_LIT[current] == null ? 0 : CORE_LIT[current]
+      for (let q = 0; q < CORE_POS.length; q += 1) {
+        core.push(skinDot(
+          SKIN_K + CORE_POS[q][0], SKIN_K + CORE_POS[q][1],
+          q === 0 ? 1.5 : 1.2,
+          q < cn ? 'k tp-' + current : 'g',
+        ))
+      }
+
+      // 测速读头：一段 8 点的弧，带尾迹。默认不可见，只在 probe 期间出现。
+      const probe = []
+      for (let p = 0; p < 8; p += 1) {
+        const pa = ((-90 - p * 14) * Math.PI) / 180
+        probe.push(skinDot(
+          SKIN_K + 9.4 * Math.cos(pa), SKIN_K + 9.4 * Math.sin(pa),
+          1.3 - p * 0.08, 'w',
+          'opacity:' + round2(1 - p * 0.12),
+        ))
+      }
+
+      return '<svg class="cfp-skin cfp-ring-core" viewBox="0 0 25 25" width="25" height="25" ' +
+        'aria-hidden="true" focusable="false" data-tier="' + worseTier(current, candidate) + '">' +
+        '<g class="cfp-side-cand">' + ring.join('') + '</g>' +
+        '<g class="cfp-side-cur">' + core.join('') + '</g>' +
+        '<g class="cfp-probe"><g class="cfp-probe-brake"><g class="cfp-probe-rotor">' +
+        probe.join('') + '</g></g></g>' +
+        '</svg>'
+    }
+
+    // ---- 皮肤二：余温 afterglow ----
+
+    /** 四圈：半径、点数、点半径。 */
+    /**
+     * 四圈：半径、点数、点半径。
+     *
+     * 点半径按「25px 下要看得清」定的，不是按放大稿。外圈 14 点排在 r=9.2 上，
+     * 弧长间距约 4.1，点直径 2.1 还留着一倍空隙，不会连成环。
+     */
+    const GLOW_RINGS = [[2.6, 5, 1.4], [4.8, 8, 1.3], [7.0, 11, 1.15], [9.2, 14, 1.05]]
+    const GLOW_PROBE = [[2.6, 5, 0.8], [4.8, 8, 0.75], [7.0, 11, 0.7], [9.2, 14, 0.64]]
+    /** 候选档位 → 光铺到第几圈。nodata 铺不出去（没有读数就没有光）。 */
+    const GLOW_REACH = { excellent: 9.9, good: 7.6, fair: 5.4, poor: 3.2, nodata: 0 }
+    /** 当前档位 → 中心多亮。nodata 只留一颗几乎看不见的芯。 */
+    const GLOW_CORE = { excellent: 1, good: 0.82, fair: 0.6, poor: 0.34, nodata: 0.12 }
+
+    /**
+     * 余温：点阵位置永远不动。光晕铺到第几圈 = 候选，中心多亮 = 当前。
+     *
+     * 两个读数共用一张光晕、靠两个参数表达，所以它天然是一个完整图形。
+     *
+     * @param {{ current: string, candidate: string }} options
+     * @returns {string}
+     */
+    function renderAfterglow(options) {
+      const current = options.current
+      const candidate = options.candidate
+      const reach = GLOW_REACH[candidate] == null ? 9.9 : GLOW_REACH[candidate]
+      const core = GLOW_CORE[current] == null ? 0.16 : GLOW_CORE[current]
+      const ghost = TIER_ORDER[current] === 4 && TIER_ORDER[candidate] === 4
+
+      /**
+       * 第 rr 圈那颗点该多亮。
+       *
+       * 三条约束，缺一条这个皮肤就读不出档位：
+       *  1. 超出 reach 的点必须**真的看不见**。原来给 0.1，25px 下五档都是满盘，
+       *     只是略微变淡——读不出「光只铺到第几圈」。
+       *  2. 下限不能抬。原来 Math.max(0.14, …) 把 fair 和 poor 抬成同一个亮度，
+       *     两档就分不开了；现在下限只用来保证圈内的点不至于完全消失。
+       *  3. 圈内要有明显的内亮外暗梯度，否则「光从中心散出去」不成立。
+       */
+      function alphaOf(rr) {
+        if (reach <= 0) return 0
+        if (rr > reach + 0.6) return 0
+        const t = Math.min(1, rr / reach)
+        return Math.max(0.06, core * (1 - 0.62 * Math.pow(t, 1.4)))
+      }
+
+      function ringDots(rr, count, dr, className, alpha) {
+        // 完全透明的点不输出：省掉 DOM，也避免「看不见但存在」的干扰。
+        if (alpha === 0) return ''
+        const out = []
+        for (let i = 0; i < count; i += 1) {
+          const a = ((-90 + (i * 360) / count) * Math.PI) / 180
+          out.push(skinDot(
+            SKIN_K + rr * Math.cos(a), SKIN_K + rr * Math.sin(a), dr, className,
+            alpha == null ? '' : 'opacity:' + round2(alpha),
+          ))
+        }
+        return out.join('')
+      }
+
+      const ink = ghost ? 'g' : 'k'
+      const r0 = skinDot(SKIN_K, SKIN_K, 1.35, ink, 'opacity:' + round2(core)) +
+        ringDots(GLOW_RINGS[0][0], GLOW_RINGS[0][1], GLOW_RINGS[0][2], ink, alphaOf(GLOW_RINGS[0][0]))
+      const r1 = ringDots(GLOW_RINGS[1][0], GLOW_RINGS[1][1], GLOW_RINGS[1][2], ink, alphaOf(GLOW_RINGS[1][0]))
+      const r2 = ringDots(GLOW_RINGS[2][0], GLOW_RINGS[2][1], GLOW_RINGS[2][2], ink, alphaOf(GLOW_RINGS[2][0]))
+      const r3 = ringDots(GLOW_RINGS[3][0], GLOW_RINGS[3][1], GLOW_RINGS[3][2], ink, alphaOf(GLOW_RINGS[3][0]))
+
+      // 测速波纹：四圈，由 CSS 错开 delay 形成「由心向外」的扩散。
+      const probe = [0, 1, 2, 3].map((i) => {
+        const ring = GLOW_PROBE[i]
+        const head = i === 0 ? skinDot(SKIN_K, SKIN_K, 1.1, 'w') : ''
+        return '<g class="cfp-pw' + i + '">' + head +
+          ringDots(ring[0], ring[1], ring[2], 'w') + '</g>'
+      }).join('')
+
+      return '<svg class="cfp-skin cfp-afterglow" viewBox="0 0 25 25" width="25" height="25" ' +
+        'aria-hidden="true" focusable="false" data-tier="' + worseTier(current, candidate) + '">' +
+        '<g class="cfp-side-cur tp-' + current + '">' +
+        '<g class="cfp-r0">' + r0 + '</g><g class="cfp-r1">' + r1 + '</g>' +
+        '</g>' +
+        '<g class="cfp-side-cand tp-' + candidate + '">' +
+        '<g class="cfp-r2">' + r2 + '</g><g class="cfp-r3">' + r3 + '</g>' +
+        '</g>' +
+        '<g class="cfp-probe"><g class="cfp-probe-settle">' + probe + '</g></g>' +
+        '</svg>'
+    }
+
+    /** 皮肤 id → 渲染函数。id 与 normalizeSkin 的白名单一一对应。 */
+    const SKIN_RENDERERS = {
+      'ring-core': renderRingCore,
+      afterglow: renderAfterglow,
     }
 
     /**
-     * 太极皮肤。
+     * 把一段 SVG 字符串挂成 React 节点。
      *
-     * 实心 = 当前线路，空心 = 候选线路；两侧各自按自己的延迟被侵蚀，
-     * 眼睑取两侧里更差的那一档——眼睛是一对，不能左睁右闭。
+     * 用 `dangerouslySetInnerHTML`：皮肤是设计资产，产出的是纯静态标记，
+     * 不含事件与外部输入。这样皮肤可以脱离 React 独立预览与替换。
+     *
+     * 这个 span 就是 .cfp-glyph（25px 容器）。Banner 里不再套第二层——
+     * 两层同名容器会让内层丢掉 display:block，图标缩在按钮左上角。
+     *
+     * @param {{ skin: string, current: string, candidate: string }} props
+     * @returns {any}
      */
-    function TaijiIcon({ curMs, bestMs }) {
-      const curTier = erodeTierOf(curMs)
-      const bestTier = erodeTierOf(bestMs)
-      const uid = useStableId()
-      const idLeft = uid + '-l'
-      const idRight = uid + '-r'
-      // 两侧都不应在「没有数据」时显得完好，所以取更差的一档。
-      // 注意方向：order 越大表示越差，所以取**大**的那个。
-      const eyeTier = curQualityOrder(curTier) >= curQualityOrder(bestTier) ? curTier : bestTier
-
-      return h('svg', {
-        className: 'cfp-skin cfp-taiji',
-        viewBox: '0 0 64 64',
+    function SkinGlyph({ skin, current, candidate }) {
+      const renderer = SKIN_RENDERERS[skin] ?? SKIN_RENDERERS['ring-core']
+      return h('span', {
+        className: 'cfp-glyph',
         'aria-hidden': 'true',
-        focusable: 'false',
-        'data-tier': eyeTier,
-        style: { '--cfp-eye': String(EYE_OPEN[eyeTier] ?? 1) },
-      },
-        h('defs', null,
-          taijiMask(idLeft, curTier, false),
-          taijiMask(idRight, bestTier, true)),
-        // 三层动效容器，与设计稿同构（顺序不能反）：
-        //   icon-motion → 待机 60s 一圈（最慢的外层）
-        //   icon-tremor → 按档位抖动（差档肉眼可见，中档缓慢）
-        //   icon-spin   → 交接时的急转（一次性）
-        // 分开三层是因为三者要能叠加：抖动期间照样在转，交接时停掉前两者。
-        h('g', { className: 't-motion' },
-          h('g', { className: 't-tremor' },
-            h('g', { className: 't-spin' },
-              h('g', { mask: 'url(#' + idLeft + ')' },
-                h('path', { className: 't-half t-half-l', d: TAIJI_LEFT_HALF }),
-                h('path', { className: 't-ink t-outline', d: TAIJI_ARC_LEFT })),
-              h('g', { mask: 'url(#' + idRight + ')' },
-                h('path', { className: 't-half t-half-r', d: TAIJI_RIGHT_HALF }),
-                h('path', { className: 't-ink t-outline', d: TAIJI_ARC_RIGHT })),
-              h('path', { className: 't-ink t-s', d: TAIJI_S }),
-              h('g', { className: 't-eye t-eye-top' },
-                h('circle', { className: 't-eye-disc', cx: 32, cy: 17, r: 5.4 })),
-              h('g', { className: 't-eye t-eye-bottom' },
-                h('circle', { className: 't-eye-disc', cx: 32, cy: 47, r: 5.4 }))))))
-    }
-
-    /** 档位排序用：数值越大越差，用来挑「两侧里更差的」。 */
-    function curQualityOrder(tier) {
-      return { excellent: 0, good: 1, fair: 2, poor: 3 }[tier] ?? 3
+        dangerouslySetInnerHTML: { __html: renderer({ current, candidate }) },
+      })
     }
 
     function Banner(props) {
       const { snapshot, error } = useSnapshot()
       const [swap, setSwap] = useState(false)
-      const [complete, setComplete] = useState(false)
+      const [arriving, setArriving] = useState(false)
       const [probing, setProbing] = useState(false)
       const [probePhase, setProbePhase] = useState('')
       const [probeNote, setProbeNote] = useState('')
       const previous = useRef(null)
-      const previousStream = useRef(null)
       const swapTimer = useRef(0)
-      const doneTimer = useRef(0)
       const probeTimer = useRef(0)
-      const brakeTimer = useRef(0)
+      const arriveTimer = useRef(0)
 
       // 只有 current.ip 真的变了（或宿主记了新的 lastSwitch）才播换线动画。
       useEffect(() => {
         const before = previous.current
         previous.current = snapshot
-        if (snapshot === null || before === null) return
+        if (snapshot === null) return
+        // 第一次拿到读数：落位动画，让「刚出现」和「一直在」区分开。
+        if (before === null) {
+          setArriving(true)
+          clearTimeout(arriveTimer.current)
+          arriveTimer.current = setTimeout(() => setArriving(false), 520)
+          return
+        }
         const movedIp = before.current && snapshot.current
           && before.current.ip !== snapshot.current.ip
         const movedAt = snapshot.lastSwitch && before.lastSwitch
@@ -909,22 +1138,26 @@ window.__ModuleLoader__.load({
         swapTimer.current = setTimeout(() => setSwap(false), SWAP_MS)
       }, [snapshot])
 
-      // 流停下那一刻扩一圈完成环；只在「真的在流」之后才算。
-      useEffect(() => {
-        const now = snapshot === null ? null : streamOf(snapshot, props)
-        const before = previousStream.current
-        previousStream.current = now
-        if (before !== 'stream' || now !== 'idle') return
-        setComplete(true)
-        clearTimeout(doneTimer.current)
-        doneTimer.current = setTimeout(() => setComplete(false), COMPLETE_MS)
-      }, [snapshot, props && props.streaming, props && props.busy])
-
       useEffect(() => () => {
         clearTimeout(swapTimer.current)
-        clearTimeout(doneTimer.current)
         clearTimeout(probeTimer.current)
+        clearTimeout(arriveTimer.current)
       }, [])
+
+      /** 测速收尾的时长。与皮肤 CSS 里的 brake 动画长度一致。 */
+      const BRAKE_MS = 1400
+
+      /**
+       * 测速的两段：spin（持续转/扩散）→ brake（收尾 1400ms）。
+       *
+       * 宿主只负责切换阶段与等待，**不参与任何旋转**。两套皮肤的测速
+       * 各自在字形内部完成：环芯是读头沿环扫过、余温是中心向外的亮度波。
+       * 如果这里再给整枚图标加旋转，就会和皮肤自己的动效叠加成「转两遍」。
+       */
+      const brake = async () => {
+        setProbePhase('brake')
+        await new Promise((resolve) => { window.setTimeout(resolve, BRAKE_MS) })
+      }
 
       /**
        * 点击图标 = 测速 + 写入，走的是配置页那两个真实接口。
@@ -932,13 +1165,9 @@ window.__ModuleLoader__.load({
        * 刻意**不做**乐观更新：状态只认 /state 快照。因为它真的会改用户的 hosts，
        * 屏幕上不能先假装成功了。
        *
-       * 动效按设计稿 spinWhile 的四段来：
-       *   加速 600ms → 匀速 620ms/圈（CSS 负责，测速期间一直在转）
-       *   → 刹车 1400ms（scan 一结束就切到 brake，缓停）
-       *   → 写入。这样「转完了才写」和设计稿的观感一致。
+       * 动效分成两段交给皮肤：先 spin，扫描结束后 brake 1400ms，再写入。
+       * 这样「转完了才写」和设计稿的观感一致。
        */
-      const delay = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
-
       const runProbe = async () => {
         if (probing) return
         setProbing(true)
@@ -948,10 +1177,9 @@ window.__ModuleLoader__.load({
           const scanned = await store.run(() => call('scan', {}))
           const count = scanned?.candidates?.length ?? 0
 
-          // 刹车：让旋转停在一个整齐的角度上，再开始写入。
+          // 刹车：让旋转停在整齐角度上，再开始写入。
           // 这段是纯动画时间，不阻塞后端（apply 在它之后才发）。
-          setProbePhase('brake')
-          await delay(1400)
+          await brake()
           setProbePhase('')
 
           setProbeNote('写入中…')
@@ -971,7 +1199,6 @@ window.__ModuleLoader__.load({
         } finally {
           setProbing(false)
           setProbePhase('')
-          clearTimeout(brakeTimer.current)
           clearTimeout(probeTimer.current)
           probeTimer.current = setTimeout(() => setProbeNote(''), 4200)
         }
@@ -983,6 +1210,10 @@ window.__ModuleLoader__.load({
 
       // 宿主不可达且从未拿到过快照时，宁可不占位，也不编一个状态。
       if (snapshot === null) return null
+
+      // 「显示图标」关掉后，横幅整块不渲染——但它只是不画，测量和自动切换
+      // 照常进行。用户要的是眼不见，不是停用功能。
+      if (snapshot.config?.showUi === false) return null
 
       const current = snapshot.current
       const best = snapshot.best
@@ -1004,24 +1235,30 @@ window.__ModuleLoader__.load({
       const hold = holdOf(snapshot.state)
 
       // 断网时当前格只剩底点，不给任何「快」的暗示。
-      const curQuality = currentMs === null || offline ? 0 : qualityOf(currentMs)
-      const bestQuality = bestMs === null ? 0 : qualityOf(bestMs)
+      // 断网时不给任何「快」的暗示：当前读数按无数据处理。
       const curMs = offline ? null : currentMs
 
-      // 候选够阈值才算「值得挪」；只快一点不催。借用值不参与。
+      /**
+       * 候选够阈值才算「值得挪」；只快一点不催。借用值不参与。
+       *
+       * 两侧都必须有真实读数：`advantageMs` 是宿主算的，但单侧缺数据时它可能
+       * 仍是上一轮的值。没有当前读数就没有「比当前快」可言，没有候选读数就没有
+       * 比较对象——两种情况下都不能让界面暗示「有更快的线路」。
+       */
       const advantage = borrowed || typeof snapshot.advantageMs !== 'number'
         ? null
         : snapshot.advantageMs
       const threshold = typeof snapshot.thresholdMs === 'number'
         ? snapshot.thresholdMs
         : (snapshot.config?.switchThresholdMs ?? 150)
-      const gap = borrowed
+      const comparable = !borrowed && currentMs !== null && bestMs !== null
+      const gap = !comparable
         ? null
-        : (advantage !== null
-          ? advantage
-          : (currentMs !== null && bestMs !== null ? currentMs - bestMs : null))
-      const better = gap !== null && gap >= threshold
-      const arrow = better || (gap !== null && gap > 0 && gap < threshold)
+        : (advantage !== null ? advantage : currentMs - bestMs)
+      const better = comparable && gap !== null && gap >= threshold
+      // 「候选侧在催」= 候选确实更快（够不够阈值都算）：够阈值是 better，
+      // 不够是弱提示。受阻/上限那两种状态要靠它，所以必须含 better。
+      const arrow = comparable && gap !== null && gap > 0
 
       const tone = offline ? ' is-dead'
         : snapshot.state === 'all-degraded' ? ' is-alert'
@@ -1034,8 +1271,6 @@ window.__ModuleLoader__.load({
         + (stale ? '，候选数据已过期' : '')
         + '，' + (stream === 'stream' ? '正在生成' : '空闲')
         + (error === null ? '' : '，状态未更新')
-
-      const orbTone = TONE[baseToneOf(bestMs)] || TONE.good
 
       /**
        * 告警文字。
@@ -1056,7 +1291,17 @@ window.__ModuleLoader__.load({
       }
       const warn = WARN_TEXT[snapshot.state] ?? ''
 
-      const candExtra = (stale ? 'is-stale' : '')
+      /**
+       * cluster 上的一组修饰类。原来这里拼了字符串却从不使用，于是
+       * 「候选过期 / 有更快候选 / 受阻 / 可挪」四种语义在界面上全部消失。
+       * 现在每一条都对应 CSS 里的一条真实动效（见「动效接线」段）：
+       *   is-stale   → 候选读数不作数，图标压到 .6
+       *   has-better → 候选已测到且差距够，环上亮一次
+       *   is-blocked → 需要提权，慢呼吸
+       *   is-held    → 自动关闭 / 今日上限，慢呼吸
+       *   is-donor   → 换线中，亮条从候选侧横扫
+       */
+      const candExtra = (stale ? ' is-stale' : '')
         + (better ? ' has-better' : '')
         + (arrow && hold === 'blocked' ? ' is-blocked' : '')
         + (arrow && hold === 'held' ? ' is-held' : '')
@@ -1069,20 +1314,15 @@ window.__ModuleLoader__.load({
        * 用户明确要求「用 circle 的 02 替换同心圆」。改 id 会让已存配置失效，
        * 所以保留 id、换实现。
        */
-      const skin = snapshot.config?.skin === 'taiji' ? 'taiji' : 'ring'
+      const skin = snapshot.config?.skin === 'afterglow' ? 'afterglow' : 'ring-core'
 
       // 点击测速不适用于纯展示：断网时连测都测不了，按钮就是假的。
       const canProbe = !probing && snapshot.state !== 'offline'
 
-      const glyph = skin === 'taiji'
-        ? h(TaijiIcon, { key: 'taiji', curMs, bestMs })
-        : h(SpokeIcon, {
-          key: 'spokes',
-          curQuality: offline ? 0 : curQuality,
-          bestQuality,
-          curMs,
-          bestMs,
-        })
+      // 两侧各算一个档位；皮肤只认 tier，不认毫秒。
+      const curTier = tierOf(curMs)
+      const candTier = tierOf(bestMs)
+      const glyph = h(SkinGlyph, { skin, current: curTier, candidate: candTier })
 
       return h('div', {
         className: 'cfp-root cfp-dock',
@@ -1105,10 +1345,12 @@ window.__ModuleLoader__.load({
             + (probing ? ' is-busy' : '')
             + (swap ? ' is-swap' : '')
             + (borrowed ? ' is-borrowed' : '')
+            + (arriving ? ' is-arriving' : '')
+            // 候选侧的四种语义现在真的生效（原 candExtra 从未被插入）。
+            + candExtra
             + (error === null ? '' : ' is-dim'),
           // 测速阶段：'' → spin（加速+匀速）→ brake（缓停）。CSS 靠它切动画。
           'data-probe-phase': probePhase,
-          style: { '--cfp-tone': orbTone },
         },
           h('button', {
             type: 'button',
@@ -1116,7 +1358,10 @@ window.__ModuleLoader__.load({
             'aria-label': spoken + '，点击测速并切换',
             disabled: !canProbe,
             onClick: () => { void runProbe() },
-          }, glyph),
+          },
+            // 图标本体。SkinGlyph 自带 .cfp-glyph 容器，这里不再套一层。
+            // 所有动效都由皮肤内部 CSS 驱动，宿主不给它任何 transform。
+            glyph),
           // 告警文字：只有「用户需要做点什么」的状态才出现，其余保持纯视觉。
           warn === '' ? null : h('span', { className: 'cfp-warn' }, warn),
           probeNote === '' ? null : h('span', { className: 'cfp-warn is-probe' }, probeNote)),
@@ -1337,18 +1582,15 @@ window.__ModuleLoader__.load({
      * （用户要求用它替换同心圆）。id 不能改，否则已存配置会失效。
      */
     const SKIN_CHOICES = [
-      { id: 'ring', name: '辐条', desc: '左半当前、右半候选，圈数读速度' },
-      { id: 'taiji', name: '太极', desc: '实心当前、空心候选，侵蚀读延迟' },
+      { id: 'ring-core', name: '环芯', desc: '外环覆盖读候选，内芯点亮读当前' },
+      { id: 'afterglow', name: '余温', desc: '光晕铺多远读候选，中心多亮读当前' },
     ]
 
     /** 设置页里的静态缩略图：用固定延迟画一颗，不连真实状态。 */
+    /** 设置页里的静态缩略图：用固定档位画一颗，不连真实状态。 */
     function SkinPreview({ id }) {
-      if (id === 'taiji') {
-        return h(TaijiIcon, { curMs: 340, bestMs: 470 })
-      }
-      return h(SpokeIcon, { curQuality: 0.9, bestQuality: 0.72, curMs: 240, bestMs: 380 })
+      return h(SkinGlyph, { skin: id, current: 'excellent', candidate: 'good' })
     }
-
     function ConfigPage(props) {
       // 宿主传 view: 'summary' | 'page'。summary 只用于插件那一行的摘要，
       // page 才是整页配置。
@@ -1580,7 +1822,7 @@ window.__ModuleLoader__.load({
                   + '左半是当前线路，右半是候选线路。'))),
             h('div', { className: 'cfp-skins', role: 'radiogroup', 'aria-label': '图标皮肤' },
               SKIN_CHOICES.map((choice) => {
-                const active = (snapshot.config?.skin ?? 'ring') === choice.id
+                const active = (snapshot.config?.skin ?? 'ring-core') === choice.id
                 return h('button', {
                   key: choice.id,
                   type: 'button',
@@ -1598,6 +1840,14 @@ window.__ModuleLoader__.load({
                   h('span', { className: 'cfp-skinName' }, choice.name),
                   h('span', { className: 'cfp-skinDesc' }, choice.desc))
               })),
+
+            h('h4', { className: 'cfp-sub' }, '显示'),
+            switchRow(
+              '在输入框显示图标',
+              '关掉后输入框左上角不再出现这枚图标，测量与自动切换照常进行。',
+              config.showUi !== false,
+              'showUi',
+            ),
 
             h('h4', { className: 'cfp-sub' }, '怎么切'),
             switchRow(
@@ -1753,4 +2003,3 @@ window.__ModuleLoader__.load({
     }
   },
 })
-

@@ -330,6 +330,8 @@ function normalizeConfig(raw) {
   const concurrency = clamp(Number(source.candidateConcurrency ?? base.candidateConcurrency), 1, 12)
   const config = {
     autoWrite: source.autoWrite === true,
+    // 默认显示。只有显式写成 false 才关掉——配置缺失时应保持可见。
+    showUi: source.showUi !== false,
     currentProbeMs: clamp(Number(source.currentProbeMs ?? base.currentProbeMs), 1_000, 60_000),
     candidateConcurrency: concurrency,
     // 候选轮间隔**不再从输入取值**：它完全由并发数推导，用户改不了。
@@ -349,15 +351,16 @@ function normalizeConfig(raw) {
 }
 
 /**
- * 横幅图标的皮肤。白名单之外的任何值都退回 ring——
+ * 横幅图标的皮肤。白名单之外的任何值都退回 ring-core——
  * 配置写坏时宁可显示默认皮肤，也不要让横幅整块消失。
- * 三格点阵（fan）已删除：旧配置里若残留 'fan'，这里会把它迁到 'ring'。
+ * 旧 id（ring / taiji / fan）已废弃：前两代实现连画法一起删掉了，
+ * 这里统一迁到第一个新皮肤。
  *
  * @param {unknown} raw
  * @returns {import('./lib/types.js').SkinId}
  */
 function normalizeSkin(raw) {
-  return raw === 'taiji' ? 'taiji' : 'ring'
+  return raw === 'afterglow' ? 'afterglow' : 'ring-core'
 }
 
 /**

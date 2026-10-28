@@ -77,6 +77,8 @@ UAC 需要用户在安全桌面自己确认，插件无法自动完成。手动�
 | 项 | 默认 | 说明 |
 |---|---|---|
 | `autoWrite` | false | 判定成立时是否真的写 hosts |
+| `showUi` | true | 是否在输入框显示状态图标。关掉后只是不画，测量与自动切换照常 |
+| `skin` | `ring-core` | 图标皮肤：`ring-core`（环芯）/ `afterglow`（余温） |
 | `currentProbeMs` | 6000 | 当前 IP 采样间隔 |
 | `candidateConcurrency` | 2 | 候选轮并发，**直接决定一轮时长** |
 | `roundIntervalMin` | 5 | 候选轮间隔，受并发下限约束 |
@@ -84,6 +86,8 @@ UAC 需要用户在安全桌面自己确认，插件无法自动完成。手动�
 | `maxSwitchesPerDay` | 48 | 24h 自动切换上限，可下调（1–48） |
 | `probeWhileThinking` | false | 思考中是否继续探测 |
 | `addresses` | 3 个 open-design 域名 | 每项带启用勾选；启用项才参与探测 / `cert_ok` / 写入 |
+
+图标的完整规格（尺寸、四档口径、两套皮肤读法、动效时序、色彩）见 [UI-SPEC.md](UI-SPEC.md)。
 
 **不开放**：20s 采样窗口、25s 槽位。这两个是测量口径的一部分，不是旋钮。
 
@@ -120,13 +124,15 @@ lib/hosts.js          hosts 读写：标记段、备份、原子替换、刷新 
 lib/config-store.js   配置持久化
 lib/admin.js          管理员判定（不提权）
 lib/types.js          内部类型
-client.js             浏览器半：配置页 + 会话横幅
+client.js             浏览器半：配置页 + 会话横幅 + 两套皮肤的渲染
+UI-SPEC.md            图标规格：尺寸、四档口径、两套皮肤读法、动效时序、色彩
 ```
 
 ## 自测
 
 ```powershell
-cd C:\Users\Administrator\dsh-plugins\cf-pin
+cd <插件目录>
+node _tools\motion-check.mjs client.js   # 图标渲染：两套皮肤 / 四档 / 各状态（10 场景 40+ 断言）
 node _tools\selftest.mjs      # hosts 语义 / 百分位 / 淘汰边界 / 派生读数（22 项，不联网）
 node _tools\engine-check.mjs  # 状态机 / 判定 / 每日上限 / 持久化（25 项）
 node _tools\route-check.mjs   # 路由与配置归一化（26 项，不写系统 hosts）
