@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-cf-pin",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "description": "持续测量 open-design.ai 链路的 Cloudflare 边缘 IP，劣化时自动改写 hosts 优选段。",
@@ -19,6 +19,8 @@
     "icon.svg",
     "README.md",
     "UI-SPEC.md",
+    "docs/ui-states.png",
+    "docs/ui-states-and-rules.md",
     "lib/admin.js",
     "lib/config-store.js",
     "lib/engine.js",

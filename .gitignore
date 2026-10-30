@@ -10,6 +10,9 @@ _shots/
 cf-pin-data/
 *.log
 
+# `_tools/render-states.mjs` 的中间产物（正文见 docs/）
+_tmp-ui-states.html
+
 # Windows / 编辑器噪音
 Thumbs.db
 Desktop.ini
