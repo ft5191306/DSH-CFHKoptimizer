@@ -29,8 +29,25 @@ window.__ModuleLoader__.load({
 
     const POLL_MS = 4000
     const FLASH_MS = 320
-    /** 换线动画在屏幕上停留的时长；飞行本身 520ms，留一点余量给收尾。 */
-    const SWAP_MS = 640
+    /**
+     * 换线动画在屏幕上停留的时长。
+     *
+     * UI-SPEC 4.2 定的是一次性换线 **1500ms**，两套皮肤的 CSS 也照这个写的
+     * （环芯末点 300ms 延迟 + 1200ms 动画；余温四条轨道都是 1.5s）。
+     * 这里原先是 640——只有 43% 的动画能播完，用户看到的是「吸到一半就没了」。
+     * 取值必须 ≥ 动画总长，多出的 60ms 只是收尾余量。
+     */
+    const SWAP_MS = 1560
+    /** 落位动画本身的时长（环芯末点 280+200=480ms，留一点余量）。 */
+    const ARRIVE_MS = 520
+    /**
+     * 判「全局首读刚发生」的窗口。
+     *
+     * 落位动画只在引擎第一次拿到当前读数后的这个窗口内播。窗口必须比一次轮询
+     * 周期（4s）宽，否则刚启动的会话可能刚好错过它；又必须够短，否则几十秒后
+     * 新开的会话还会误以为「图标刚出现」而重播。
+     */
+    const ARRIVE_WINDOW_MS = 8000
     /** 本包名。详情页的 slot 会为所有插件派发，门禁要靠它认自己。 */
     const PACKAGE_NAME = '@local/dsh-cf-pin'
 
@@ -42,10 +59,20 @@ window.__ModuleLoader__.load({
      * @returns {Promise<any>}
      */
     async function call(path, body) {
+      /**
+       * 必须有超时。没有它的时候，宿主路由一旦挂住（连接没建立、或 fetch
+       * 注册之后走了别的路径），调用方的 `finally { setBusyAction('') }`
+       * 永远不会执行 —— 配置页三个按钮会**永久 disabled**，用户只能刷新页面。
+       * 引擎侧有 MANUAL_TTL_MS 兜底，配置页这一侧以前没有任何兜底。
+       *
+       * 120s 足够覆盖最慢的一次 /scan（256 次粗筛 + 12×地址×20s 采样），
+       * 又不至于让用户对着不动的按钮等太久。
+       */
       const response = await fetch('/api/dsh-cf-pin/' + path, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body ?? {}),
+        signal: AbortSignal.timeout(120_000),
       })
       const payload = await response.json()
       if (payload === null || typeof payload !== 'object' || payload.ok !== true) {
@@ -66,6 +93,14 @@ window.__ModuleLoader__.load({
       'cold-start': { text: '正在测量链路…', tone: 'idle' },
       normal: { text: '链路正常', tone: 'ok' },
       switched: { text: '已切换到更快的线路', tone: 'ok' },
+      /**
+       * 全劣化下的「相对择优」写入。
+       *
+       * 这里不能复用 switched 的「更快的线路」——没有一条是健康的，写进去的
+       * 只是其中丢包相对少、延迟相对低的一条。说成常规切换会让用户以为
+       * 链路已经恢复，下次再卡时就会怀疑插件在乱写。
+       */
+      'degraded-switched': { text: '全部线路偏慢，已切到相对较好的一条', tone: 'warn' },
       observing: { text: '不用处理 · 有更快的线路，但差距不够', tone: 'idle' },
       'auto-off': { text: '有更快的线路，但自动切换是关的', tone: 'idle' },
       'waiting-write': { text: '有更快的线路，等这条回复结束就切', tone: 'work' },
@@ -73,7 +108,6 @@ window.__ModuleLoader__.load({
       'all-degraded': { text: '当前线路偏慢，也没有更好的可选', tone: 'warn' },
       offline: { text: '网络连不上，暂停检测', tone: 'idle' },
       'probe-failed': { text: '这一轮没测到数据，稍后自动重试', tone: 'idle' },
-      'daily-limit': { text: '今天不再自动切换了', tone: 'idle' },
       'need-admin': { text: '找到了更快的线路，但需要管理员权限才能切换', tone: 'warn' },
     }
     const UNKNOWN = { text: '链路状态未知', tone: 'idle' }
@@ -100,10 +134,10 @@ window.__ModuleLoader__.load({
       return snapshot?.state === 'waiting-write' ? 'stream' : 'idle'
     }
 
-    /** 换线被挡住的三种情形：候选格不闪作「可以挪」，改成慢呼吸。 */
+    /** 换线被挡住的情形：候选格不闪作「可以挪」，改成慢呼吸。 */
     function holdOf(state) {
       if (state === 'need-admin') return 'blocked'
-      if (state === 'auto-off' || state === 'daily-limit') return 'held'
+      if (state === 'auto-off') return 'held'
       return ''
     }
 
@@ -163,8 +197,12 @@ window.__ModuleLoader__.load({
       let snapshot = null
       let error = null
       /**
-       * scan / apply 进行中时暂停轮询，避免和一轮 1 分钟的检测抢链路、也避免
-       * 拿到半截状态。
+       * 「动作在飞」的计数，只用来在归零时补一次刷新。
+       *
+       * 轮 4 之前它还是个轮询开关：`busy > 0` 时整页跳过 refresh，结果 A 会话
+       * 测速时 B 会话的轮询也被停掉，B 根本读不到 manual 已经变成 scan ——
+       * 那正是「切会话图标不同步」的两个根因之一。现在轮询**不因它暂停**，
+       * 只由下面的 `inflight` 防重叠。
        */
       let busy = 0
       let inflight = false
@@ -180,8 +218,16 @@ window.__ModuleLoader__.load({
         if (document.hidden !== true) void refresh()
       }
 
+      /**
+       * 拉一次快照。
+       *
+       * 注意**不因 busy 而停**：`/state` 读的是宿主内存里的一份快照，不发任何
+       * 网络探测，不会和正在跑的检测抢链路。以前这里 `busy > 0` 直接 return，
+       * 而 busy 是页面级共享的，于是「A 会话点了测速 → 切到 B 会话」时 B 的
+       * 轮询也被一起停掉，看不到 manual.phase 已经变成 scan——图标自然不同步。
+       */
       async function refresh() {
-        if (inflight || busy > 0) return
+        if (inflight) return
         inflight = true
         try {
           snapshot = await call('state', {})
@@ -272,7 +318,7 @@ window.__ModuleLoader__.load({
   padding:1px 0 5px}
 .cfp-cluster{position:relative;display:inline-flex;align-items:center;gap:8px;
   padding:2px 0;line-height:0}
-/* 告警文字：只在需要用户动手时出现（权限 / 上限 / 断网等）。
+/* 告警文字：只在需要用户动手时出现（权限 / 断网等）。
    刻意做小、做淡——它是提示不是警告弹窗，不能盖过图标本身。 */
 @keyframes cfp-warn-in{from{opacity:0;transform:translateX(-3px)}to{opacity:1;transform:none}}
 .cfp-warn{flex:none;font-size:11.5px;line-height:16px;letter-spacing:.01em;
@@ -285,9 +331,11 @@ window.__ModuleLoader__.load({
 /* 减少动效：必须用 !important。.cfp-warn.is-probe 特异性 0,2,0 且写在后面，
    媒体查询本身不提升特异性——原写法压不住它，测速提示仍在做位移淡入。 */
 
-/* 断网 / 全劣化：整颗图标压暗或缓慢明暗，表示真的慢。 */
-.cfp-cluster.is-dead .cfp-skin{opacity:.5}
-.cfp-cluster.is-dim{opacity:.55}
+/* 断网 / 全劣化：整颗图标压暗或缓慢明暗，表示真的慢。
+   压暗只写在皮肤内部那一层（.cfp-ring-core / .cfp-afterglow 的 opacity）。
+   这里曾经还有一组打在 .cfp-skin 和 .cfp-cluster 上的同语义规则，
+   与皮肤内规则叠乘后把 is-dim 压到 .30（本该 .55）、候选侧压到 .24（本该 .4），
+   像旧三格设计的残留。删掉外层，让压暗只发生一次。 */
 .cfp-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
   clip-path:inset(50%);white-space:nowrap;border:0}
 .cfp-text{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -315,8 +363,6 @@ window.__ModuleLoader__.load({
 .cfp-section{margin-top:22px;padding-top:16px;border-top:1px solid var(--dsw-alias-border-l1)}
 /* 详情页里的设置区块：宿主已经在外面画了分节，这里不再叠分隔线。 */
 .cfp-detailSection .cfp-section{margin-top:16px;padding-top:0;border-top:0}
-.cfp-h{margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:.02em;
-  color:var(--dsw-alias-label-secondary)}
 /* 折叠体内部的视觉分节标题。它不折叠，只是分组标签，层次仍是一级入口。 */
 .cfp-sub{margin:16px 0 4px;font-size:11px;font-weight:600;letter-spacing:.04em;
   color:var(--dsw-alias-label-tertiary,#8b8f96);text-transform:none}
@@ -374,15 +420,16 @@ window.__ModuleLoader__.load({
 .cfp-summary .cfp-text{white-space:normal}
 .cfp-summaryTail{margin-left:auto;flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 /* ---- 动效关键字：每一条都在下面「动效接线」里被真实引用，一个都不许剩 ---- */
-/* 流式呼吸：模型正在输出。图标整体明暗，不位移——它不该抢注意力。 */
-
-/* 流式扩散波：从图标向外扩一圈，颜色取候选档位（--cfp-tone）。 */
+/* 流式呼吸：**未实现（有意为之）**。
+   流式状态这一版没有做，所以这里刻意不挂任何动画。data-stream 仍然由
+   Banner 产出（取值 stream / idle），但它目前没有任何 CSS 消费者；
+   读屏文案（spoken）里的「正在生成 / 空闲」照常工作。
+   将来要做流式动效时，在这里给 [data-stream='stream'] 接一条只在暗度上
+   变化的循环动画即可；不要改成位移或旋转——测速/换线已经占用了那些通道。 */
 
 /* 候选更快：候选侧的一次性脉动，提示「可以挪了」。 */
 
 /* 换线落地：当前侧被敲一下，确认「新的当前已经生效」。 */
-
-/* 回复收尾：一圈从中心扩散到消失（0.94s，与 COMPLETE_MS 对齐）。 */
 
 /* 受阻慢呼吸：需要你动手（提权 / 明天再来），所以慢，不催。 */
 
@@ -404,6 +451,36 @@ window.__ModuleLoader__.load({
 .cfp-skinBtn:disabled{cursor:default}
 .cfp-skinBtn:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary,#74b9ff);
   outline-offset:5px}
+/* ---- 悬停提示：当前 / 候选延迟 ----
+   纯 CSS 触发（:hover / :focus-within），**不用 JS state**：
+   它不是插件状态，只是这颗图标的注脚，没必要跨会话同步。
+   用 visibility 而不是 display，这样它有过渡、也不会在不可见时抢焦点。
+   定位基准是 .cfp-cluster（图标那一行的实际盒子，本身已是 position:relative），
+   不是 .cfp-dock —— 后者撑满整行宽度，left:0 会让提示跑到窗口最左边。 */
+.cfp-tip{position:absolute;left:-6px;bottom:calc(100% + 4px);z-index:30;
+  display:flex;flex-direction:column;gap:2px;
+  padding:6px 9px;border-radius:8px;white-space:nowrap;
+  font-size:11.5px;line-height:15px;font-variant-numeric:tabular-nums;
+  color:var(--dsw-alias-label-primary,#eef0f3);
+  background:var(--dsw-alias-bg-overlay,#22252a);
+  border:1px solid var(--dsw-alias-border-l2,#3a3a40);
+  box-shadow:0 4px 14px rgba(0,0,0,.28);
+  opacity:0;visibility:hidden;transform:translateY(2px);
+  transition:opacity .14s ease,transform .14s ease,visibility .14s;
+  pointer-events:none}
+/* 触发范围只包住图标按钮本身：挂在 .cfp-dock 上会让「鼠标扫过整行输入框」
+   也弹提示，太吵。按钮已有 :focus-visible，键盘用户照样能用。 */
+.cfp-cluster:hover .cfp-tip,
+.cfp-cluster:focus-within .cfp-tip{opacity:1;visibility:visible;transform:none}
+/* 指针设备才有「悬停」；触屏上它会在点击后粘住，所以只对能悬停的设备启用。 */
+@media (hover:none){
+  .cfp-cluster:hover .cfp-tip,.cfp-cluster:focus-within .cfp-tip{
+    opacity:0;visibility:hidden;transform:translateY(2px)}
+}
+.cfp-tipRow{display:flex;align-items:baseline;gap:6px}
+.cfp-tipKey{flex:none;min-width:2.6em;color:var(--dsw-alias-label-tertiary,#8b8f96)}
+.cfp-tipVal{font-weight:600}
+.cfp-tipNote{color:var(--dsw-alias-label-tertiary,#8b8f96);font-size:10.5px}
 /* 测速结果只出现几秒就自己消失；它是提示，不是常驻状态。 */
 .cfp-warn.is-probe{color:var(--dsw-alias-label-tertiary,#8b8f96);
   animation:cfp-warn-in .22s ease both}
@@ -430,14 +507,6 @@ window.__ModuleLoader__.load({
    注意：宿主**不**在这里施加旋转。两套新皮肤的测速动效都在字形内部完成
    （环芯是读头沿环扫过、余温是中心向外的亮度波），旋转整枚图标会与它们叠加。 */
 .cfp-glyph{display:block;flex:none;width:25px;height:25px;line-height:0}
-/* 装饰层用的状态色变量：只做第二通道，主通道是皮肤自带的四档色相。 */
-.cfp-cluster{--cfp-tone:var(--dsw-alias-state-business-primary)}
-/* 四档色相直接绑定宿主的语义状态色。
-   宿主 token 自己会在明暗主题间翻转（requiresLightAndDark），
-   所以这里不需要猜 [data-theme] 之类的选择器，也就没有
-   「主题标记猜错 → 亮色值画在深底上」的风险。
-   这同时也是四档的唯一来源：值始终存在，不存在「变量未定义导致
-   fill 声明无效、SVG 退回黑色」的失败模式。 */
 /* 四档色相直接绑定宿主的语义状态色。
    宿主 token 自己会在明暗主题间翻转（requiresLightAndDark），
    所以这里不需要猜 [data-theme] 之类的选择器，也就没有
@@ -450,21 +519,13 @@ window.__ModuleLoader__.load({
   --v-fair:var(--dsw-alias-state-warn-primary,#b5761f);
   --v-poor:var(--dsw-alias-state-error-primary,#c3433a);
 }
-/* 过期的候选读数：图标压到「不作数」的亮度，靠形状不再暗示快。
-   属性与类是同一条语义的两个通道，这里都点名，避免某一侧漏掉。 */
-.cfp-cluster.is-stale .cfp-skin,
-.cfp-dock[data-stale='1'] .cfp-skin{opacity:.6}
-/* 借用值压淡：同上，data-borrowed 是属性通道。 */
-.cfp-dock[data-borrowed='1'] .cfp-skin{opacity:.72}
+/* 过期 / 借用：压暗只由皮肤内部那一层负责（.cfp-side-cand 的 opacity）。
+   这里曾经还压了一次整张 .cfp-skin（.6 / .72），两层相乘让候选侧掉到 .24 / .29，
+   比设计值 .4 暗一倍。属性通道（data-stale / data-borrowed）皮肤内部同样认，
+   所以这里删掉不会让任何一个通道失效。 */
 .cfp-dock[data-probing='1'] .cfp-skinBtn{cursor:progress}
 .cfp-dock[data-probing='1'] .cfp-skinBtn:hover{background:transparent}
 .cfp-dock[data-warn]:not([data-warn='']) .cfp-cluster{gap:10px}
-/* 太极在 25px 下的描边补偿：属性通道确认是太极才加，避免影响辐条。 */
-.cfp-dock[data-skin='taiji'] .cfp-glyph{shape-rendering:geometricPrecision}
-/* 候选读数是借来的（启动时还没测速）：整体压淡，表明「这不是测出来的数」。
-   眼睛倍睁必须用 !important：组件把 --cfp-eye 内联在同一元素上，而行内声明
-   只有在样式表声明带 !important 时才会被压过。原来不带 !important，那条是死的。 */
-.cfp-cluster.is-borrowed .cfp-skin{opacity:.72}
 /* 配置页状态圆点：与横幅无关，是设置页自己的状态指示。 */
 .cfp-dot{flex:none;width:6px;height:6px;border-radius:50%;
   background:var(--dsw-alias-label-tertiary,#8b8f96)}
@@ -487,9 +548,10 @@ window.__ModuleLoader__.load({
      .is-alert 或 [data-state=all-degraded]  全劣化明暗
      .is-dead .is-dim .is-stale [data-borrowed=1]  静态降权
 
-   三套调色板（潮汐 / 鸢尾 / 苔原）只换 8 个变量。当前插件内置「潮汐」，
-   其余两套保留在 UI-SPEC 里作为可选主题；换色只改下面的默认值，
-   几何与动效不受影响。
+   颜色只有一个来源：下面 .cfp-cluster 里那四个 --v-* 变量，各自绑到宿主的
+   语义状态色 token（--dsw-alias-state-*），并带十六进制兜底。宿主 token
+   自己会在明暗主题间翻转，所以这里不需要挑主题、也不会出现「变量未定义导致
+   fill 声明无效、SVG 退回黑色」这种失败模式。
    ========================================================================== */
 
 /* 25px：嵌在输入框里，尺寸变了会挤坏布局。 */
@@ -497,9 +559,9 @@ window.__ModuleLoader__.load({
 
 /* ===== 皮肤一：环芯 ring-core ===== */
 /* ==========================================================================
-   2. 皮肤 · 环芯 ring-core / 潮汐 TIDE
+   2. 皮肤 · 环芯 ring-core
    外圈 16 点 = 候选（角度覆盖），内芯 5 点 = 当前（点亮数）。
-   三个变体只换颜色；几何、档位映射、动效时长逐字节相同。
+   单套色板；几何、档位映射、动效时长与余温共用同一份定义。
    测速不旋转整枚图标：读头与刹车都发生在字形内部的 cfp-probe 子层。
    ========================================================================== */
 .cfp-ring-core .k{fill:var(--dsw-alias-label-primary,#eef0f3)}
@@ -648,11 +710,9 @@ window.__ModuleLoader__.load({
 .cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-ring-core .cfp-side-cand,
 .cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-ring-core .cfp-side-cur{animation:cfp01-revive 1.4s cubic-bezier(.08,.62,.22,1) both}
 
-}
-
 /* ===== 皮肤二：余温 afterglow ===== */
 /* ==========================================================================
-   2. 皮肤 · 余温 afterglow / 潮汐 TIDE
+   2. 皮肤 · 余温 afterglow
    点阵位置永远不动：光晕铺到第几圈 = 候选，中心多亮 = 当前。
    每一侧按自己的档位取色（tp-*），亮度与半径仍读两个值。
    测速不旋转整枚图标：波纹与刹车都在字形内部的 cfp-probe 子层。
@@ -742,6 +802,29 @@ window.__ModuleLoader__.load({
 .cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow .cfp-r1{animation:cfp04-ext1 1.5s cubic-bezier(.3,0,.25,1) both}
 .cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow .cfp-r2{animation:cfp04-ext2 1.5s cubic-bezier(.3,0,.25,1) both}
 .cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow .cfp-r3{animation:cfp04-ext3 1.5s cubic-bezier(.3,0,.25,1) both}
+/* ---- 圈外点（.cfp-far）：静止不可见，事件动画期间才被抬起来 ----
+   这些点静态 opacity 是 0（内联），所以它们的存在不影响「光铺到第几圈」的读法；
+   但它们在 DOM 里，于是 has-better / arrive / swap 的组级动画总有可动对象。
+   用 animation 覆盖内联 opacity —— 动画优先级高于内联样式，这是关键。
+
+   两个一次性动画（arrive / swap）的 100% 必须回到 0：宿主移除类名之前若停在
+   非零帧，会因为 fill-mode:both 一直亮着，等于把「静止不可见」破坏掉。 */
+@keyframes cfp04-far-in{
+  0%{opacity:0}
+  45%{opacity:.38}
+  100%{opacity:0}}
+@keyframes cfp04-far-pulse{
+  0%,100%{opacity:.22}
+  50%{opacity:.5}}
+@keyframes cfp04-far-swap{
+  0%{opacity:0}
+  30%{opacity:.38}
+  65%{opacity:.1}
+  100%{opacity:0}}
+.cfp-cluster.is-arriving .cfp-afterglow .cfp-far{animation:cfp04-far-in .44s cubic-bezier(.2,.7,.3,1) both}
+.cfp-cluster.has-better .cfp-afterglow .cfp-far{animation:cfp04-far-pulse 1.7s ease-in-out infinite}
+.cfp-cluster:is(.is-swap,.is-donor) .cfp-afterglow .cfp-far{animation:cfp04-far-swap 1.5s cubic-bezier(.3,0,.25,1) both}
+
 /* probe 优先：测速期间常驻循环一律让位 */
 .cfp-cluster.is-busy .cfp-skin.cfp-afterglow{animation:none;transition:none}
 .cfp-cluster.is-busy .cfp-skin.cfp-afterglow .cfp-side-cand,
@@ -767,7 +850,6 @@ window.__ModuleLoader__.load({
 .cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-afterglow .cfp-side-cand,
 .cfp-cluster.is-busy[data-probe-phase="brake"] .cfp-afterglow .cfp-side-cur{animation:cfp04-revive 1.4s cubic-bezier(.08,.62,.22,1) both}
 
-}
 /* ---- 减少动效：一条规则关掉全部 ---- */
 @media (prefers-reduced-motion:reduce){
   .cfp-skin,.cfp-skin *,.cfp-glyph{animation:none!important;transition:none!important}
@@ -895,16 +977,10 @@ window.__ModuleLoader__.load({
     /** 坐标中心：viewBox 25×25。 */
     const SKIN_K = 12.5
 
-    /**
-     * 档位 → 宿主状态色。只给装饰层（流式波 / 完成环 / 换线亮条）做第二通道；
-     * 皮肤自身的四档色相由 CSS 变量 `--v-*` 负责，不从这里取。
-     */
-    const TONE_ORB = {
-      excellent: 'var(--dsw-alias-state-success-primary)',
-      good: 'var(--dsw-alias-state-business-primary)',
-      fair: 'var(--dsw-alias-state-warn-primary)',
-      poor: 'var(--dsw-alias-state-error-primary,#d9534f)',
-    }
+    // 早先这里有一张 TONE_ORB（档位 → 宿主状态色），是给「流式扩散波 / 完成环 /
+    // 换线亮条」这些装饰层做第二通道的。那批装饰层随「一颗图标读两侧」一起删掉后，
+    // 它就没有任何引用了；CSS 里的 --cfp-tone 同理。已一并移除，
+    // 免得下一个人以为还有一条能用的取色通道。
 
     function round2(value) {
       return Math.round(value * 100) / 100
@@ -1003,6 +1079,19 @@ window.__ModuleLoader__.load({
     const GLOW_REACH = { excellent: 9.9, good: 7.6, fair: 5.4, poor: 3.2, nodata: 0 }
     /** 当前档位 → 中心多亮。nodata 只留一颗几乎看不见的芯。 */
     const GLOW_CORE = { excellent: 1, good: 0.82, fair: 0.6, poor: 0.34, nodata: 0.12 }
+    /**
+     * 超出 reach 的点：静态不可见，但**留在 DOM 里**，动效期间由 CSS 临时点亮。
+     *
+     * 这个值必须是 0。两条弯路都试过了：
+     *  - 留 0.1 微光：25px 下五档全变满盘，读不出「光只铺到第几圈」；
+     *  - 整颗不输出：fair / poor / nodata 三档候选侧变成空组，has-better 脉动、
+     *    arrive 淡入、换线的 ext2/ext3 全都没有可动对象。
+     * 而 opacity:0 的占位点单独放上去也一样没用——组级 opacity 动画乘出来还是 0。
+     *
+     * 所以走第三条路：点在 DOM 里、静态 opacity 为 0、**只在事件动画里被抬起来**。
+     * 静止时读档位靠「哪几圈亮」，事件时靠 CSS 把整组点亮（见 cfp04-ghost 规则）。
+     */
+    const FAR_ALPHA = 0
 
     /**
      * 余温：点阵位置永远不动。光晕铺到第几圈 = 候选，中心多亮 = 当前。
@@ -1020,42 +1109,48 @@ window.__ModuleLoader__.load({
       const ghost = TIER_ORDER[current] === 4 && TIER_ORDER[candidate] === 4
 
       /**
-       * 第 rr 圈那颗点该多亮。
+       * 第 rr 圈那颗点该多亮。返回 0 表示这颗点在**静态**下不可见。
        *
-       * 三条约束，缺一条这个皮肤就读不出档位：
-       *  1. 超出 reach 的点必须**真的看不见**。原来给 0.1，25px 下五档都是满盘，
-       *     只是略微变淡——读不出「光只铺到第几圈」。
+       * 四条约束，缺一条这个皮肤就读不出档位：
+       *  1. 圈外（rr > reach + 0.6）的点静态必须是 0，不能和圈内的点同亮。
+       *     25px 下给到 0.1 就会让五档都变成满盘，只是略微变淡——读不出「光铺到第几圈」。
        *  2. 下限不能抬。原来 Math.max(0.14, …) 把 fair 和 poor 抬成同一个亮度，
        *     两档就分不开了；现在下限只用来保证圈内的点不至于完全消失。
        *  3. 圈内要有明显的内亮外暗梯度，否则「光从中心散出去」不成立。
+       *  4. 静态为 0 的点仍然要**输出到 DOM**，并挂 cfp-far 类：它们靠事件动画
+       *     （has-better / arrive / swap）被 CSS 抬起来，这样动效有可动对象，
+       *     而静止时又真的看不见。
        */
       function alphaOf(rr) {
-        if (reach <= 0) return 0
-        if (rr > reach + 0.6) return 0
+        if (reach <= 0) return FAR_ALPHA
+        if (rr > reach + 0.6) return FAR_ALPHA
         const t = Math.min(1, rr / reach)
         return Math.max(0.06, core * (1 - 0.62 * Math.pow(t, 1.4)))
       }
 
-      function ringDots(rr, count, dr, className, alpha) {
-        // 完全透明的点不输出：省掉 DOM，也避免「看不见但存在」的干扰。
-        if (alpha === 0) return ''
+      /**
+       * 一圈点。alpha 为 0 时仍然输出，但挂上 cfp-far：静止不可见，动画期间点亮。
+       */
+      function ringDots(rr, count, dr, className, alpha, far) {
+        const cls = far === true ? className + " cfp-far" : className
         const out = []
         for (let i = 0; i < count; i += 1) {
           const a = ((-90 + (i * 360) / count) * Math.PI) / 180
           out.push(skinDot(
-            SKIN_K + rr * Math.cos(a), SKIN_K + rr * Math.sin(a), dr, className,
-            alpha == null ? '' : 'opacity:' + round2(alpha),
+            SKIN_K + rr * Math.cos(a), SKIN_K + rr * Math.sin(a), dr, cls,
+            alpha == null ? "" : "opacity:" + round2(alpha),
           ))
         }
-        return out.join('')
+        return out.join("")
       }
-
       const ink = ghost ? 'g' : 'k'
+      /** 这一圈相对当前 reach 是否在圈外（静态不可见，靠 cfp-far 在事件里点亮）。 */
+      const farOf = (rr) => reach <= 0 || rr > reach + 0.6
       const r0 = skinDot(SKIN_K, SKIN_K, 1.35, ink, 'opacity:' + round2(core)) +
-        ringDots(GLOW_RINGS[0][0], GLOW_RINGS[0][1], GLOW_RINGS[0][2], ink, alphaOf(GLOW_RINGS[0][0]))
-      const r1 = ringDots(GLOW_RINGS[1][0], GLOW_RINGS[1][1], GLOW_RINGS[1][2], ink, alphaOf(GLOW_RINGS[1][0]))
-      const r2 = ringDots(GLOW_RINGS[2][0], GLOW_RINGS[2][1], GLOW_RINGS[2][2], ink, alphaOf(GLOW_RINGS[2][0]))
-      const r3 = ringDots(GLOW_RINGS[3][0], GLOW_RINGS[3][1], GLOW_RINGS[3][2], ink, alphaOf(GLOW_RINGS[3][0]))
+        ringDots(GLOW_RINGS[0][0], GLOW_RINGS[0][1], GLOW_RINGS[0][2], ink, alphaOf(GLOW_RINGS[0][0]), farOf(GLOW_RINGS[0][0]))
+      const r1 = ringDots(GLOW_RINGS[1][0], GLOW_RINGS[1][1], GLOW_RINGS[1][2], ink, alphaOf(GLOW_RINGS[1][0]), farOf(GLOW_RINGS[1][0]))
+      const r2 = ringDots(GLOW_RINGS[2][0], GLOW_RINGS[2][1], GLOW_RINGS[2][2], ink, alphaOf(GLOW_RINGS[2][0]), farOf(GLOW_RINGS[2][0]))
+      const r3 = ringDots(GLOW_RINGS[3][0], GLOW_RINGS[3][1], GLOW_RINGS[3][2], ink, alphaOf(GLOW_RINGS[3][0]), farOf(GLOW_RINGS[3][0]))
 
       // 测速波纹：四圈，由 CSS 错开 delay 形成「由心向外」的扩散。
       const probe = [0, 1, 2, 3].map((i) => {
@@ -1108,24 +1203,76 @@ window.__ModuleLoader__.load({
       const { snapshot, error } = useSnapshot()
       const [swap, setSwap] = useState(false)
       const [arriving, setArriving] = useState(false)
-      const [probing, setProbing] = useState(false)
-      const [probePhase, setProbePhase] = useState('')
-      const [probeNote, setProbeNote] = useState('')
       const previous = useRef(null)
       const swapTimer = useRef(0)
-      const probeTimer = useRef(0)
       const arriveTimer = useRef(0)
+
+      /** 测速收尾的时长。与皮肤 CSS 里的 brake 动画长度一致。 */
+      const BRAKE_MS = 1400
+
+      /**
+       * 组件是否还挂着。卸载后置 false：正在跑的 runProbe 不再继续发请求。
+       *
+       * 为什么必须要它：runProbe 是「测速 → 等 1400ms → 写 hosts」的串行流程，
+       * 而写 hosts 是**机器级副作用**。用户在等待期间切走会话或关掉配置页，
+       * 组件卸载了，可那个 1400ms 的等待仍然会结束，然后照常发 `/apply` ——
+       * 也就是说，一次已经被用户离开的操作，仍然改了他系统的 hosts。
+       *
+       * 以前这个等待是一个裸 `window.setTimeout`，既没有清理也没有挂载检查。
+       * 声明必须在下面的 effect 之前：cleanup 闭包会引用它们。
+       */
+      const aliveRef = useRef(true)
+
+      /**
+       * 刹车等待的取消器（卸载时调用，让 await 立刻返回）。
+       *
+       * 只是提前结束等待还不够：等待结束后要判 `aliveRef`，才能真正拦住 /apply。
+       * 这里把定时器句柄也存下来，避免卸载后的空转。
+       */
+      const brakeRef = useRef(/** @type {null | (() => void)} */ (null))
+      const releaseBrake = () => {
+        const release = brakeRef.current
+        brakeRef.current = null
+        if (release !== null) release()
+      }
+
+      /**
+       * 可取消的等待。卸载时 `releaseBrake()` 会立刻兑现它。
+       * @param {number} ms
+       * @returns {Promise<void>}
+       */
+      const waitBrake = (ms) => new Promise((resolve) => {
+        const timer = window.setTimeout(() => {
+          brakeRef.current = null
+          resolve()
+        }, ms)
+        brakeRef.current = () => {
+          window.clearTimeout(timer)
+          resolve()
+        }
+      })
 
       // 只有 current.ip 真的变了（或宿主记了新的 lastSwitch）才播换线动画。
       useEffect(() => {
         const before = previous.current
         previous.current = snapshot
         if (snapshot === null) return
-        // 第一次拿到读数：落位动画，让「刚出现」和「一直在」区分开。
+        /**
+         * 落位动画的判据是**全局的**，不是「这个组件第一次拿到数据」。
+         *
+         * 以前用 `before === null`，而每个会话的横幅是独立组件，各自第一次
+         * 挂载的时机不同——于是每切到一个新会话都会重播一次落位，可图标
+         * 其实一直都在。现在改看引擎的 `firstReadingAt`：只有全局首读刚发生
+         * （几秒内）才播。
+         */
+        const firstAt = typeof snapshot.firstReadingAt === 'number' ? snapshot.firstReadingAt : 0
+        const globalJustArrived = firstAt > 0 && Math.abs(snapshot.now - firstAt) < ARRIVE_WINDOW_MS
         if (before === null) {
-          setArriving(true)
-          clearTimeout(arriveTimer.current)
-          arriveTimer.current = setTimeout(() => setArriving(false), 520)
+          if (globalJustArrived) {
+            setArriving(true)
+            clearTimeout(arriveTimer.current)
+            arriveTimer.current = setTimeout(() => setArriving(false), ARRIVE_MS)
+          }
           return
         }
         const movedIp = before.current && snapshot.current
@@ -1133,31 +1280,20 @@ window.__ModuleLoader__.load({
         const movedAt = snapshot.lastSwitch && before.lastSwitch
           && before.lastSwitch.at !== snapshot.lastSwitch.at
         if (!movedIp && !movedAt) return
+        // 换线动画同理：只在这个组件亲眼看到变化时播，切到别的会话不补播。
         setSwap(true)
         clearTimeout(swapTimer.current)
         swapTimer.current = setTimeout(() => setSwap(false), SWAP_MS)
       }, [snapshot])
 
       useEffect(() => () => {
+        aliveRef.current = false
         clearTimeout(swapTimer.current)
-        clearTimeout(probeTimer.current)
         clearTimeout(arriveTimer.current)
+        // 释放「刹车等待」：卸载后再等满 1400ms 毫无意义，而且那之后
+        // 原本还会接着发一次会改用户 hosts 的 /apply（见 runProbe）。
+        releaseBrake()
       }, [])
-
-      /** 测速收尾的时长。与皮肤 CSS 里的 brake 动画长度一致。 */
-      const BRAKE_MS = 1400
-
-      /**
-       * 测速的两段：spin（持续转/扩散）→ brake（收尾 1400ms）。
-       *
-       * 宿主只负责切换阶段与等待，**不参与任何旋转**。两套皮肤的测速
-       * 各自在字形内部完成：环芯是读头沿环扫过、余温是中心向外的亮度波。
-       * 如果这里再给整枚图标加旋转，就会和皮肤自己的动效叠加成「转两遍」。
-       */
-      const brake = async () => {
-        setProbePhase('brake')
-        await new Promise((resolve) => { window.setTimeout(resolve, BRAKE_MS) })
-      }
 
       /**
        * 点击图标 = 测速 + 写入，走的是配置页那两个真实接口。
@@ -1166,41 +1302,40 @@ window.__ModuleLoader__.load({
        * 屏幕上不能先假装成功了。
        *
        * 动效分成两段交给皮肤：先 spin，扫描结束后 brake 1400ms，再写入。
-       * 这样「转完了才写」和设计稿的观感一致。
+       * 刹车是**纯客户端动画**，所以它只在这里本地等待，不写回引擎——
+       * 引擎的阶段只表达「后端真的在做什么」，动画不配占用公共状态。
        */
       const runProbe = async () => {
-        if (probing) return
-        setProbing(true)
-        setProbePhase('spin')
-        setProbeNote('测速中…')
+        // 别的会话正在测速时，这一枚按钮不该被点第二下（后端是同一个引擎）。
+        if (snapshot?.manual?.busy === true) return
         try {
-          const scanned = await store.run(() => call('scan', {}))
-          const count = scanned?.candidates?.length ?? 0
+          await store.run(() => call('scan', {}))
+          if (!aliveRef.current) return
 
           // 刹车：让旋转停在整齐角度上，再开始写入。
           // 这段是纯动画时间，不阻塞后端（apply 在它之后才发）。
-          await brake()
-          setProbePhase('')
+          await waitBrake(BRAKE_MS)
 
-          setProbeNote('写入中…')
+          // 卸载检查：这里是最要紧的一道。`/apply` 会真的改写系统 hosts，
+          // 用户已经离开这个组件（切会话/关配置页）就不该再替他写一次。
+          if (!aliveRef.current) return
+
           try {
             // 用户要求：点击触发的写入不许被任何东西拦住。
             // 所以这里既不等 confirm，也不把 alreadyOptimal 当成「没执行」——
             // 后端现在会真的写一次，这里只负责如实报告写了哪些 IP。
-            const applied = await store.run(() => call('apply', {}))
-            const ips = applied?.ips ?? []
-            setProbeNote(ips.length > 0 ? '已切到 ' + ips.join('、') : '已写入')
-          } catch (cause) {
-            setProbeNote('写入失败：' + String(cause?.message ?? cause))
+            //
+            // 「没测到数据」这一种情况由引擎的 manual.note 表达（它知道候选数），
+            // 客户端不重复造一句自己的文案。
+            await store.run(() => call('apply', {}))
+          } catch {
+            // 写入失败的文案同样由引擎的 manual.note 给出。
           }
-          if (count === 0) setProbeNote((prev) => (prev === '' ? '没测到数据' : prev))
-        } catch (cause) {
-          setProbeNote('测速失败')
+        } catch {
+          // 测速失败同理。
         } finally {
-          setProbing(false)
-          setProbePhase('')
-          clearTimeout(probeTimer.current)
-          probeTimer.current = setTimeout(() => setProbeNote(''), 4200)
+          // 立刻拉一次，让图标的忙碌状态尽快收敛（不等下一个 4s 轮询）。
+          void store.refresh()
         }
       }
 
@@ -1214,6 +1349,23 @@ window.__ModuleLoader__.load({
       // 「显示图标」关掉后，横幅整块不渲染——但它只是不画，测量和自动切换
       // 照常进行。用户要的是眼不见，不是停用功能。
       if (snapshot.config?.showUi === false) return null
+
+      /**
+       * 手动操作的阶段全部来自快照（`snapshot.manual`），**不再用本地 state**。
+       *
+       * 原因：引擎在宿主进程里是全局唯一的，但每个会话的横幅是独立组件。
+       * 以前「在测速」是组件本地 state，于是 A 会话点了测速、切到 B 会话，
+       * B 画的是它自己的空闲状态（或者更糟：A 卸载后动画残留）。
+       * 现在所有会话读同一份状态，切换会话不再让图标忽亮忽灭。
+       *
+       * 放在提前 return 之后：这两个 return 之后 snapshot 一定非 null。
+       */
+      const manual = snapshot.manual ?? { phase: '', note: '', busy: false }
+      const probing = manual.busy === true
+      const probePhase = manual.phase === 'scan' ? 'spin'
+        : manual.phase === 'brake' ? 'brake'
+          : ''
+      const probeNote = manual.note ?? ''
 
       const current = snapshot.current
       const best = snapshot.best
@@ -1257,7 +1409,7 @@ window.__ModuleLoader__.load({
         : (advantage !== null ? advantage : currentMs - bestMs)
       const better = comparable && gap !== null && gap >= threshold
       // 「候选侧在催」= 候选确实更快（够不够阈值都算）：够阈值是 better，
-      // 不够是弱提示。受阻/上限那两种状态要靠它，所以必须含 better。
+      // 不够是弱提示。受阻那种状态要靠它，所以必须含 better。
       const arrow = comparable && gap !== null && gap > 0
 
       const tone = offline ? ' is-dead'
@@ -1276,17 +1428,24 @@ window.__ModuleLoader__.load({
        * 告警文字。
        *
        * 纯视觉只能表达「有点不对」，表达不了「为什么没换、你要做什么」。
-       * 这两类必须给字，否则用户看到候选格在呼吸，却不知道是要去提权还是等明天：
+       * 只有需要用户动手的那一类才给字，否则用户看到候选格在呼吸却不知道
+       * 要做什么：
        *   - need-admin：他能解决（用管理员身份重启）
-       *   - daily-limit：他也能解决（临时调高上限，或等明天）
-       * 其余状态（正常/观察中/等待写入/无候选/断网）不加字——那些不需要用户动作，
-       * 加了就是噪音，违背「平时不打扰」。
+       * 其余状态（正常/观察中/等待写入/无候选/断网/全劣化/降级）不加字——
+       * 那些不需要用户动作，加了就是噪音，违背「平时不打扰」。
        */
       const WARN_TEXT = {
         'need-admin': '需要管理员权限才能切换',
-        'daily-limit': '今日已达切换上限',
         'offline': '网络连不上',
         'all-degraded': '当前线路偏慢，且无更好候选',
+        // 降级切换只是一次「矮子里拔将军」：不喊得比 need-admin 更急，但必须
+        // 和常规切换分开——否则「全部偏慢」会被读成「已经好了」。
+        //
+        // 降级还要再分一层：如果写入的候选丢包率比原线路更高，那它连「相对较好」
+        // 都算不上，只是一条「延迟低但更不稳」的线。这两句话不能混。
+        'degraded-switched': snapshot.lastSwitchLossy === true
+          ? '全部偏慢，已切到延迟较低的一条（丢包更多）'
+          : '全部偏慢，已切到相对较好的一条',
         'probe-failed': '这一轮没测到数据',
       }
       const warn = WARN_TEXT[snapshot.state] ?? ''
@@ -1298,7 +1457,7 @@ window.__ModuleLoader__.load({
        *   is-stale   → 候选读数不作数，图标压到 .6
        *   has-better → 候选已测到且差距够，环上亮一次
        *   is-blocked → 需要提权，慢呼吸
-       *   is-held    → 自动关闭 / 今日上限，慢呼吸
+       *   is-held    → 自动关闭，慢呼吸
        *   is-donor   → 换线中，亮条从候选侧横扫
        */
       const candExtra = (stale ? ' is-stale' : '')
@@ -1323,6 +1482,25 @@ window.__ModuleLoader__.load({
       const curTier = tierOf(curMs)
       const candTier = tierOf(bestMs)
       const glyph = h(SkinGlyph, { skin, current: curTier, candidate: candTier })
+
+      /**
+       * 悬停提示的两行：当前 / 候选的延迟。
+       *
+       * 用的是和图标**同一份读数**（curMs / bestMs），不另算一遍，否则图标的
+       * 档位和提示里的数字会对不上。文字坚持「纯提示」定位：
+       * 它只在悬停/聚焦时出现，不抢占常态下的注意力。
+       */
+      const tipMs = (ms) => {
+        if (typeof ms !== 'number' || !Number.isFinite(ms)) return '暂无数据'
+        // 提示里给到个位，比图标里的档位更有信息量（档位只是四档）。
+        return Math.round(ms) + 'ms'
+      }
+      const tipCurrent = offline ? '断网，测不到' : tipMs(curMs)
+      const tipBest = borrowed
+        ? '沿用当前（尚未测速）'
+        : (bestMs === null ? '暂无数据' : tipMs(bestMs))
+      const tipNote = stale ? '候选读数已过期'
+        : ''
 
       return h('div', {
         className: 'cfp-root cfp-dock',
@@ -1355,7 +1533,16 @@ window.__ModuleLoader__.load({
           h('button', {
             type: 'button',
             className: 'cfp-skinBtn',
-            'aria-label': spoken + '，点击测速并切换',
+            /**
+             * 读屏文案必须与「能不能点」一致。
+             *
+             * 以前恒为「…，点击测速并切换」，但按钮在测速中 / 断网时是 disabled：
+             * 读屏用户被告知可点、实际点不动；而且 disabled 会把焦点踢掉，
+             * 键盘用户的提示（`:focus-within`）会中途消失。
+             */
+            'aria-label': canProbe
+              ? spoken + '，点击测速并切换'
+              : spoken + (probing ? '，正在测速' : '，断网，暂不可测速'),
             disabled: !canProbe,
             onClick: () => { void runProbe() },
           },
@@ -1364,7 +1551,18 @@ window.__ModuleLoader__.load({
             glyph),
           // 告警文字：只有「用户需要做点什么」的状态才出现，其余保持纯视觉。
           warn === '' ? null : h('span', { className: 'cfp-warn' }, warn),
-          probeNote === '' ? null : h('span', { className: 'cfp-warn is-probe' }, probeNote)),
+          probeNote === '' ? null : h('span', { className: 'cfp-warn is-probe' }, probeNote),
+          // 悬停提示：当前 / 候选延迟。
+          // aria-hidden —— 同样的信息已经在按钮的 aria-label 里（spoken），
+          // 这里再读一遍会让读屏用户听两遍。
+          h('span', { className: 'cfp-tip', 'aria-hidden': 'true' },
+            h('span', { className: 'cfp-tipRow' },
+              h('span', { className: 'cfp-tipKey' }, '当前'),
+              h('span', { className: 'cfp-tipVal' }, tipCurrent)),
+            h('span', { className: 'cfp-tipRow' },
+              h('span', { className: 'cfp-tipKey' }, '候选'),
+              h('span', { className: 'cfp-tipVal' }, tipBest)),
+            tipNote === '' ? null : h('span', { className: 'cfp-tipNote' }, tipNote))),
         h('span', { className: 'cfp-sr' }, spoken))
     }
 
@@ -1415,12 +1613,33 @@ window.__ModuleLoader__.load({
         : (finishedAt > 0 ? formatAge(now - finishedAt) + ' · 每 ' + (snapshot.config?.roundIntervalMin ?? 0) + ' 分钟一轮' : '还没跑过')])
       rows.push(['上次切换', snapshot.lastSwitch
         ? formatAge(now - snapshot.lastSwitch.at)
+          // 最近一次到底是「找到更快的线」还是「矮子里拔将军」，只有这里能说清。
+          // 降级标记由引擎给（lastSwitchDegraded），前端不自己推断。
+          + (snapshot.lastSwitchDegraded === true ? ' · 本次为降级切换' : '')
+          /**
+           * 降级还可能是「拿丢包换延迟」——候选更快但更容易丢包。用户已明确
+           * 这种情况仍然写入，但文案必须如实说，不能把「更差」说成「相对较好」。
+           */
+          + (snapshot.lastSwitchLossy === true ? ' · 丢包率更高' : '')
+          // 闸门跳过了哪些 IP，也只有引擎知道。
+          + (typeof snapshot.lastSwitchCertNote === 'string' && snapshot.lastSwitchCertNote !== ''
+            ? ' · ' + snapshot.lastSwitchCertNote
+            : '')
         : '还没换过'])
-      rows.push(['今日切换', (snapshot.switchesToday ?? 0) + ' 次 · 上限 '
-        + (snapshot.config?.maxSwitchesPerDay ?? 0) + ' 次'])
       rows.push(['权限', snapshot.admin === true ? '管理员' : '普通用户，无法改写 hosts'])
       rows.push(['hosts', snapshot.hosts?.path || '—'])
       rows.push(['域名', (snapshot.hosts?.currentDomains ?? []).join(', ') || '—'])
+      /**
+       * 最近一次真实失败的原因。
+       *
+       * 引擎把「读 hosts 失败 / 采样失败 / 候选轮失败 / 写入失败」的具体原因
+       * 一路写进 `lastError`，但以前客户端一个地方都不读——用户只看得到
+       * `COPY[state]` 的泛化文案（「这一轮没测到数据，稍后自动重试」），
+       * 永远不知道到底是权限、断网还是写不进去。有值才显示，不占空行。
+       */
+      if (typeof snapshot.lastError === 'string' && snapshot.lastError !== '') {
+        rows.push(['最近错误', snapshot.lastError])
+      }
 
       const children = []
       rows.forEach((row, index) => {
@@ -1609,6 +1828,8 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState(null)
       const [busyAction, setBusyAction] = useState('')
       const [confirmReset, setConfirmReset] = useState(false)
+      // 「取消固定」的二次确认：它动的是用户的 hosts，和恢复默认一样值得停一拍。
+      const [confirmUnpin, setConfirmUnpin] = useState(false)
       const [paths, setPaths] = useState(null)
 
       if (view === 'summary') return h(ConfigSummary, { snapshot })
@@ -1633,6 +1854,24 @@ window.__ModuleLoader__.load({
       // 长动作（检测 / 写入）期间锁住控件；日常保存只锁动作按钮。
       const busy = busyAction !== ''
       const locked = busyAction === 'scan' || busyAction === 'apply'
+      /**
+       * 引擎侧的手动状态。**只用于两个动作按钮**，不参与 `locked`。
+       *
+       * 这是轮 4 那条根因的漏网之鱼：图标点测速时引擎已经把 phase 设成 scan，
+       * 但配置页读的是自己的本地 `busyAction`，于是切过来看还是「立即检测」、
+       * 按下去还会在引擎里并发再跑一次扫描（现在引擎把它合并掉了，但按钮
+       * 仍然在撒谎）。
+       *
+       * 刻意**不**把 `locked` 也接上去：那会让图标那边的测速顺手锁死整页开关，
+       * 用户在另一个会话点一下图标，回来发现设置全灰了。§1.5 也明确
+       * `busyAction` 这类「我正在做什么」应当留在组件里。
+       */
+      const manual = snapshot.manual ?? { phase: '', busy: false, note: '' }
+      const remoteBusy = manual.busy === true
+      const remoteLabel = manual.phase === 'scan' ? '检测中…'
+        : manual.phase === 'brake' ? '收尾中…'
+          : manual.phase === 'write' ? '写入中…'
+            : ''
 
       const say = (text, isError) => setNotice({ text, isError: isError === true })
 
@@ -1700,9 +1939,31 @@ window.__ModuleLoader__.load({
         try {
           const result = await store.run(() => call('apply', {}))
           const ips = result?.ips ?? []
-          say(ips.length > 0 ? '已写入 ' + ips.join('、') : '已写入')
+          const written = ips.length > 0 ? '已写入 ' + ips.join('、') : '已写入'
+          // 0 个合格候选时后端也会真的写入（相对择优），结果带 degraded。
+          // 这行提示是用户唯一的知情渠道，不能吞掉。
+          say(written + (result?.degraded === true ? '（全部偏慢，按相对择优写入）' : ''))
         } catch (cause) {
           say('写入失败：' + String(cause.message ?? cause), true)
+        } finally {
+          setBusyAction('')
+        }
+      }
+
+      // 取消固定：删掉 hosts 里的 CLOUDFLARE-PIN 标记段、回退系统 DNS。
+      //
+      // 这是「所有候选都不值得固定」时插件内唯一的逃生口：以前全劣化时既不能
+      // 自动换、手动换也被拒，用户只能去跑 cf_pin.py。它只动标记段，不改配置，
+      // 也不进 switchLog（不是一次切换）。
+      const doUnpin = async () => {
+        setBusyAction('unpin')
+        say('正在取消固定…')
+        try {
+          await store.run(() => call('unpin', {}))
+          setConfirmUnpin(false)
+          say('已取消固定，回退系统 DNS')
+        } catch (cause) {
+          say('取消固定失败：' + String(cause.message ?? cause), true)
         } finally {
           setBusyAction('')
         }
@@ -1773,21 +2034,42 @@ window.__ModuleLoader__.load({
           h('button', {
             type: 'button',
             className: 'cfp-btn',
-            disabled: busy,
+            disabled: busy || remoteBusy,
             onClick: doScan,
-          }, busyAction === 'scan' ? '检测中…' : '立即检测'),
+          }, busyAction === 'scan'
+            ? '检测中…'
+            : (manual.phase === 'scan' || manual.phase === 'brake' ? remoteLabel : '立即检测')),
           h('button', {
             type: 'button',
             className: 'cfp-btn',
-            disabled: busy,
+            disabled: busy || remoteBusy,
             // 一次点击就写入，不再有「确认写入」二次状态。
             onClick: () => { void doApply() },
-          }, busyAction === 'apply' ? '写入中…' : '立即切换'),
+          }, busyAction === 'apply'
+            ? '写入中…'
+            : (manual.phase === 'write' ? remoteLabel : '立即切换')),
           h('button', {
             type: 'button',
             className: 'cfp-btn is-ghost',
             onClick: doReveal,
           }, '文件位置'),
+          // 取消固定：全劣化时的逃生口。复用「恢复默认」的两段式确认，
+          // 第一下只换文案，第二下才真的动 hosts。
+          h('button', {
+            type: 'button',
+            className: 'cfp-btn is-ghost',
+            disabled: busy || remoteBusy,
+            onClick: () => (confirmUnpin ? void doUnpin() : setConfirmUnpin(true)),
+          }, busyAction === 'unpin'
+            ? '取消中…'
+            : (confirmUnpin ? '确认取消固定？' : '取消固定（恢复系统 DNS）')),
+          confirmUnpin
+            ? h('button', {
+              type: 'button',
+              className: 'cfp-btn is-ghost',
+              onClick: () => setConfirmUnpin(false),
+            }, '取消')
+            : null,
           notice === null ? null : h('span', {
             className: 'cfp-notice' + (notice.isError ? ' is-error' : ''),
           }, notice.text)),
@@ -1856,22 +2138,9 @@ window.__ModuleLoader__.load({
               snapshot.autoWrite === true,
               'autoWrite',
             ),
-            h('div', { className: 'cfp-item' },
-              h('div', { className: 'cfp-itemMain' },
-                h('div', { className: 'cfp-itemLabel' },
-                  '每天最多自动切换 ' + (config.maxSwitchesPerDay ?? 48) + ' 次'),
-                h('div', { className: 'cfp-itemHelp' },
-                  '超过这个次数当天就不再自动切换，避免反复折腾你的机器。')),
-              h('div', { className: 'cfp-itemCtl' },
-                h(NumberField, {
-                  value: config.maxSwitchesPerDay ?? 48,
-                  min: 1,
-                  max: 48,
-                  unit: '次',
-                  ariaLabel: '每天最多自动切换次数',
-                  disabled: locked,
-                  onCommit: (next) => { void saveConfig({ maxSwitchesPerDay: next }, 'maxSwitchesPerDay') },
-                }))),
+            // 每日切换上限已按用户要求删除：那一项原本在这里（「每天最多自动
+            // 切换 N 次」）。删它不只是省一个输入框——它是唯一会让「该切不切」
+            // 的自动侧闸门，与「烂死在一条线路上」直接冲突。
             numberRow(
               '切换阈值',
               '候选要快过当前这么多，才值得切换。',

@@ -28,9 +28,6 @@ import {
 } from './lib/engine.js'
 import { readPersistedConfig, writePersistedConfig } from './lib/config-store.js'
 
-/** 数据目录内是否已有句柄（单实例判定的落点）。 */
-const LOCK_FILE = 'engine.lock'
-
 /** 所有路由共用的前缀。 */
 const ROUTE_BASE = '/api/dsh-cf-pin'
 
@@ -43,7 +40,7 @@ const ROUTE_BASE = '/api/dsh-cf-pin'
 export function apply(ctx, rawConfig) {
   const dataDir = resolveDataDir({ profileDir: profileDirOf(ctx) })
   // 三级优先级：面板存下来的 > patch 里写的 > 内置默认。
-  // 面板改的值必须能活过重启，否则「每日上限」这类承诺会在重启后悄悄复原。
+  // 面板改的值必须能活过重启，否则面板上的承诺会在重启后悄悄复原。
   const persisted = readPersistedConfig(dataDir)
   const config = normalizeConfig(persisted ?? rawConfig)
 
@@ -73,11 +70,20 @@ export function apply(ctx, rawConfig) {
   )
 
   // ---- 思考流计数：判定要写时若正有流在飞，就先记下、等流结束再写。
-  // 探测本身不避让 —— 用户明确要求过这一点。
+  // 探测是否避让由 probeWhileThinking 决定（见下面的采样节奏）。
   try {
     ctx.on('llm/stream', (options, next) => {
       instance.streaming += 1
-      const stream = next()
+      let stream
+      try {
+        stream = next()
+      } catch (error) {
+        // next() 同步抛错时，上面已经 +1，却永远不会有流结束事件来 -1。
+        // 计数一旦泄漏，instance.streaming 永久 >0：判定永远走 waiting-write，
+        // 自动切换彻底失效，界面的「正在生成」也会一直亮着。必须在这里回滚。
+        instance.streaming = Math.max(0, instance.streaming - 1)
+        throw error
+      }
       return trackStream(stream, () => {
         instance.streaming = Math.max(0, instance.streaming - 1)
         if (instance.streaming === 0) void drainPending(instance)
@@ -93,12 +99,18 @@ export function apply(ctx, rawConfig) {
   // 改并发后必须**立刻**按新节奏跑，而 setInterval 的周期在创建时就固定了，
   // 只能靠重启插件来生效。自排程每轮重读一次 config，改完下一个周期就变。
   disposers.push(selfSchedule(ctx, () => Math.max(1_000, instance.config.currentProbeMs), async () => {
+    // probeWhileThinking=false 时，思考流在飞就先跳过这一拍，等流结束后的下一拍再补测。
+    // 这个开关以前只被存进配置、再被界面读出来画成开关，引擎里一次都没读过——
+    // 是个纯装饰的假开关。现在它是真的接线点。
+    if (!instance.config.probeWhileThinking && instance.streaming > 0) return
     await instance.sampleCurrent()
-    instance.decide()
+    // decide() 只写结论，decideAndApply() 才会真的执行它。空闲时判出的切换
+    // 以前没有任何执行者，所以自动切换只在流式期间才偶尔生效。
+    await instance.decideAndApply()
   }))
 
   // 启动后立刻采一次，不要让用户面对 6 秒空白。
-  void instance.sampleCurrent().then(() => instance.decide())
+  void instance.sampleCurrent().then(() => instance.decideAndApply()).catch(() => {})
 
   disposers.push(selfSchedule(
     ctx,
@@ -138,9 +150,11 @@ async function drainPending(instance) {
   if (instance.decision.pending !== true) return
   if (instance.decision.reason !== 'waiting-write') return
   instance.decision = { ...instance.decision, pending: false }
-  const result = await instance.apply()
-  if (result.ok) instance.decision = { write: false, reason: 'switched' }
-  else instance.lastError = result.reason ?? '写入失败'
+  // 用 decideAndApply 而不是裸 apply()：apply() 不重新判定，若这期间当前链路
+  // 已经自己变快了（或候选过期了），它会照着一个过时的结论去改 hosts。
+  // 重新判一次，只在结论仍然成立时才写。
+  if (instance.applying) return
+  await instance.decideAndApply()
 }
 
 /**
@@ -202,6 +216,29 @@ function registerRoutes(ctx, instance, dataDir) {
 
   /** @type {(() => Promise<void>)[]} */
   const disposers = []
+  /** 手动流程里的短定时器（brake 收尾）。统一记着，插件卸载时清掉。 */
+  const autoBrakeTimers = /** @type {ReturnType<typeof setTimeout>[]} */ ([])
+
+  /**
+   * 起一个 brake 收尾定时器，并在它自己触发后把自己从表里摘掉。
+   *
+   * 原实现只 `push` 从不移除，于是每点一次「立即检测」就永久多留一个已经
+   * fire 过的句柄，只有插件卸载时才清理——长会话里是缓慢而无意义的增长。
+   */
+  const armBrakeTimer = () => {
+    /** @type {ReturnType<typeof setTimeout>} */
+    let timer
+    timer = setTimeout(() => {
+      const at = autoBrakeTimers.indexOf(timer)
+      if (at !== -1) autoBrakeTimers.splice(at, 1)
+      // 先判阶段仍是 brake 才清：期间若 /apply 已把阶段改成 write，
+      // 这里什么都不做，不能把「写入中」清成空闲。
+      // 只清阶段，**不碰结果文案**——结果由 /apply 的 finishManualWrite 写，
+      // 并受自己的存活期约束（见 engine.setManualPhase 的注释）。
+      if (instance.manual.phase === 'brake') instance.setManualPhase('')
+    }, 1400)
+    autoBrakeTimers.push(timer)
+  }
 
   /**
    * @param {string} path
@@ -234,8 +271,33 @@ function registerRoutes(ctx, instance, dataDir) {
   // 自动轮次仍然照常复用（它的入口不经过这个路由）。
   // 缓存只保留给显式要求复用的调用（rescan:false 且确实想要缓存）。
   route('/scan', async (body) => {
-    const result = await instance.manualScanNow({ rescan: body?.rescan !== false })
-    return json({ ok: result.ok, value: result, error: result.ok ? undefined : { code: 'scan', message: result.reason } })
+    // 手动操作的状态由引擎持有，经 /state 广播给**所有**会话。这样 A 会话点测速、
+    // 切到 B 会话时 B 也显示测速中；而 B 不会因为自己没点过就以为空闲。
+    //
+    // 开一次新操作时把**上一次的结果文案**清掉：结果与阶段是两格（见
+    // `setManualPhase` 的注释），不清的话「已切到 X」会挂在新一轮的「测速中…」后面。
+    instance.setManualResult('')
+    instance.setManualPhase('scan', '测速中…')
+    try {
+      const result = await instance.manualScanNow({ rescan: body?.rescan !== false })
+      // 扫描结束后进 brake：收尾动画是客户端播的，但「还在忙」这件事必须由引擎
+      // 表达，否则两个请求之间会闪一下空闲，切会话时尤其明显。
+      // 覆盖动画时长即可；期间若 /apply 先到，会被 write 直接覆盖掉，
+      // 这个定时器看到 phase 已变就什么都不做（不会把写入中的状态清掉）。
+      //
+      // 合并到别人那一次扫描时（merged）阶段收尾由原请求负责：这里再设一次
+      // brake 只会把已经开始计的 1400ms 重置，等于收尾动画被拉长。
+      if (result?.merged !== true) {
+        instance.setManualPhase('brake', '测速完成')
+        instance.setManualResult(result?.ok === true ? '测速完成' : '测速失败')
+        armBrakeTimer()
+      }
+      return json({ ok: result.ok, value: result, error: result.ok ? undefined : { code: 'scan', message: result.reason } })
+    } catch (error) {
+      instance.setManualPhase('')
+      instance.setManualResult('测速失败')
+      throw error
+    }
   })
 
   // 手动「写入」：apply 语义，**永不禁用**，不受 autoWrite 影响。
@@ -247,16 +309,51 @@ function registerRoutes(ctx, instance, dataDir) {
   // 用户按下按钮就是要它真的执行一次。挡回去只会让他以为按钮坏了。
   // 真正的安全边界不在这些确认框上，而在证书闸门与 hosts 写入本身。
   route('/apply', async (body) => {
-    if (instance.manualScan !== null && instance.candidates.length === 0) {
-      instance.candidates = instance.manualScan
-    }
     // forced:true → 引擎跳过「当前已是最优」的拦截（这个参数以前只控制日志，
     // 根本没参与判断，所以传了也没用；现在它真的生效了）。
-    const result = await instance.apply({ forced: true })
+    // 全劣化时 apply() 会降级写「最不坏」的候选并返回 degraded:true，
+    // 不再返回「无合格候选，未写入」——用户按下的按钮必须真的动一次。
+    //
+    // 阶段状态同样写进引擎：写入可能持续数秒（证书闸门要连好几次），
+    // 期间任何会话切过来都应该看到「写入中」，而不是先看到空闲再突然跳变。
+    instance.setManualResult('')
+    instance.setManualPhase('write', '写入中…')
+    try {
+      const result = await instance.apply({ forced: true })
+      // 收尾**无条件执行**，包括 merged 的情况。
+      //
+      // 原实现把收尾挂在 `result.merged !== true` 上，理由是「让先到的那个说了算」。
+      // 但 `merged` 只说明「并进了别人那一发」——那一发**不一定是另一次手动 /apply**，
+      // 也可能是自动路径：`runCandidateRoundOnce` 末尾的 `decideAndApply()`、
+      // 或思考流结束时的 `drainPending()`。自动路径从不管理 manual 阶段，
+      // 于是这次手动写入的 `write` 阶段没人收尾，只能等 `MANUAL_TTL_MS`（90 秒）
+      // 自己过期。实测症状：这 90 秒里图标一直是「写入中…」、配置页三个按钮全灰，
+      // 而且不会再有任何请求来纠正它——用户以为卡死了。
+      //
+      // 收尾逻辑放在引擎里（`finishManualWrite`），因为阶段状态是引擎持有的；
+      // 放在路由里就只能靠读源码确认，测不到。它自己会判「阶段是否仍是 write」。
+      instance.finishManualWrite(result)
+      return json({
+        ok: result.ok,
+        value: result,
+        error: result.ok ? undefined : { code: 'apply', message: result.reason },
+      })
+    } catch (error) {
+      instance.finishManualWrite(null)
+      throw error
+    }
+  })
+
+  // 取消固定：删掉 hosts 标记段，回退系统 DNS。
+  //
+  // 这是「所有候选都烂到不值得固定」时唯一的逃生口：没有它，一旦标记段钉住的
+  // IP 全烂、又没有合格候选，用户在插件内既不能换也不能撤。
+  route('/unpin', async () => {
+    const result = await instance.unpin()
     return json({
       ok: result.ok,
       value: result,
-      error: result.ok ? undefined : { code: 'apply', message: result.reason },
+      error: result.ok ? undefined : { code: 'unpin', message: result.reason },
     })
   })
 
@@ -309,6 +406,7 @@ function registerRoutes(ctx, instance, dataDir) {
   }))
 
   return () => {
+    for (const timer of autoBrakeTimers.splice(0)) clearTimeout(timer)
     for (const dispose of disposers) {
       try { void dispose() } catch { /* 卸载期失败无需处理 */ }
     }
@@ -340,9 +438,9 @@ function normalizeConfig(raw) {
     // 配置输入里。旧配置里存的 roundIntervalMin 会被这一行直接覆盖。
     roundIntervalMin: minRoundIntervalMin(concurrency),
     switchThresholdMs: clamp(Number(source.switchThresholdMs ?? base.switchThresholdMs), 0, 5_000),
-    // 每日上限是「我们承诺不折腾你的机器」的证据；默认 48 次，
-    // 但用户可以往下调（0 次即只测量、不自动切）。
-    maxSwitchesPerDay: clamp(Number(source.maxSwitchesPerDay ?? base.maxSwitchesPerDay), 1, 48),
+    // 每日切换上限已整体删除（2026-10-28 用户要求）。旧 config.json 里残留的
+    // maxSwitchesPerDay 字段会被这里自然忽略、并在下一次保存配置时清掉——
+    // 刻意不做「读到就当成新语义」的兼容，因为它已经没有任何语义了。
     probeWhileThinking: source.probeWhileThinking === true,
     skin: normalizeSkin(source.skin ?? base.skin),
     addresses: normalizeAddresses(source.addresses ?? defaultAddresses()),
@@ -492,4 +590,4 @@ function profileDirOf(ctx) {
 }
 
 export { STATE }
-export { LOCK_FILE }
+

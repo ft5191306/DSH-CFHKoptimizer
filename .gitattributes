@@ -1,0 +1,7 @@
+# 统一用 LF：插件跑在 Node 上，源码本身是 LF。
+# 不加这个的话，Windows 上 `git add` 会把工作区文件转成 CRLF 提交，
+# 而 clone 下来又是另一套行尾——README 与 UI-SPEC 里逐字节比对的描述会失真。
+* text=auto eol=lf
+
+# 显式声明为二进制，避免被当文本处理
+*.svg text

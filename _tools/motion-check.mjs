@@ -101,14 +101,33 @@ function makeRuntime() {
     return out
   }
 
-  return { React, renderComponent, instances }
+  /**
+   * 卸载一个组件：跑它注册的全部 cleanup，然后从实例表里摘掉。
+   *
+   * 这是「卸载后不该还有副作用」这类断言的唯一入口——没有它，cleanup 永远
+   * 不会被执行，runProbe 那类「等待结束仍继续发请求」的缺陷无法在离线测到。
+   */
+  function unmountComponent(comp) {
+    const inst = instances.get(comp)
+    if (inst === undefined) return false
+    current = null
+    for (const cleanup of inst.unmount.splice(0)) {
+      try { cleanup() } catch { /* 卸载期失败按 React 语义忽略 */ }
+    }
+    instances.delete(comp)
+    const at = allInstances.indexOf(inst)
+    if (at !== -1) allInstances.splice(at, 1)
+    return true
+  }
+
+  return { React, renderComponent, instances, unmountComponent }
 }
 
 // ------------------------------------------------- 把客户端插件装进假环境里
 
 function loadPlugin() {
   const source = readFileSync(FILE, 'utf8')
-  const { React, renderComponent, instances } = makeRuntime()
+  const { React, renderComponent, instances, unmountComponent } = makeRuntime()
   pluginRuntime = { renderComponent }
 
   let factory = null
@@ -145,7 +164,7 @@ function loadPlugin() {
     slots: { inject: (_n, fn) => fn(), register: (_o, comp) => slots.push(comp) },
   })
 
-  return { slots, renderComponent, instances }
+  return { slots, renderComponent, instances, unmountComponent }
 }
 
 // collect() 需要渲染子组件（它们内部有 hook），走同一个运行时。
@@ -170,15 +189,24 @@ function snapshot(over) {
     thresholdMs: 150,
     round: { running: false, startedAt: now - 60_000, finishedAt: now - 30_000 },
     lastSwitch: null,
-    switchesToday: 1,
+    lastSwitchDegraded: false,
+    // 全劣化下写入的候选丢包更高时，引擎会把这一位置 true；文案据此换说法。
+    lastSwitchLossy: false,
+    // 闸门跳过了哪些 IP（人话），空串表示没跳过。
+    lastSwitchCertNote: '',
+    lastError: null,
     config: {
       autoWrite: false, currentProbeMs: 6000, candidateConcurrency: 2,
-      roundIntervalMin: 5, switchThresholdMs: 150, maxSwitchesPerDay: 48,
+      roundIntervalMin: 5, switchThresholdMs: 150,
       probeWhileThinking: false, skin: 'ring',
       addresses: [{ address: 'amr-link.open-design.ai', enabled: true }],
     },
     derived: { roundDurationMs: 150_000, candidateCount: 12, slotMs: 25_000, windowMs: 20_000 },
     hosts: { path: 'C:\\hosts', currentIps: ['162.159.1.1'], currentDomains: ['amr-link.open-design.ai'] },
+    // 手动操作状态与全局首读时刻：默认「很久以前就启动过、当前空闲」，
+    // 这样绝大多数场景不会误触发落位动画。需要时由各场景自己覆盖。
+    manual: { phase: '', startedAt: 0, note: '', busy: false },
+    firstReadingAt: now - 600_000,
     now,
     ...over,
   }
@@ -205,7 +233,9 @@ function check(label, condition, extra) {
 }
 
 /** 把渲染树里的 class / 属性摘出来。 */
-function collect(tree, out = { classes: new Set(), attrs: {}, tags: new Set(), html: '' }) {
+function collect(tree, out = { classes: new Set(), attrs: {}, tags: new Set(), html: '', text: '' }) {
+  // 纯文本子节点（例如提示里的 "312ms"）也要收进 text，否则断言看不到它们。
+  if (typeof tree === 'string' || typeof tree === 'number') { out.text += String(tree); return out }
   if (tree === null || tree === undefined || typeof tree !== 'object') return out
   if (Array.isArray(tree)) { tree.forEach((t) => collect(t, out)); return out }
   const p = tree.props ?? {}
@@ -427,6 +457,296 @@ console.log('\n场景 11：CSS 模板完整性（反引号会把模板截断，�
   check('CSS 模板内无反引号', !css.includes('`'))
   check('CSS 之后紧接 function Styles', raw.slice(b, b + 40).includes('function Styles'))
   check('CSS 长度合理（>10k）', css.length > 10000, String(css.length))
+}
+
+console.log('\n场景 12：图标状态跨会话一致（同一份快照 = 同一份图标状态）')
+{
+  // 模拟两个会话：各自独立渲染 Banner，读的却是同一个引擎快照。
+  // 以前 `probing` 是组件本地 state，A 会话点了测速 B 会话看不到。
+  const s = snapshot({})
+  s.manual = { phase: 'scan', startedAt: s.now - 500, note: '测速中…', busy: true }
+  installFetch(s)
+  const mod = loadPlugin()
+  const banner = mod.slots[2]
+
+  // 会话 A
+  mod.renderComponent(banner, {})
+  await sleep(30)
+  const a = collect(mod.renderComponent(banner, {}))
+
+  // 会话 B：另一个页面/会话里的同一枚图标，没有点过任何东西
+  const modB = loadPlugin()
+  const bannerB = modB.slots[2]
+  modB.renderComponent(bannerB, {})
+  await sleep(30)
+  const b = collect(modB.renderComponent(bannerB, {}))
+
+  check('A 会话显示测速中', a.classes.has('is-busy'), [...a.classes].join(','))
+  check('B 会话也显示测速中（未点过也不落队）', b.classes.has('is-busy'), [...b.classes].join(','))
+  check('两个会话 probe-phase 相同', a.attrs['data-probe-phase'] === b.attrs['data-probe-phase'],
+    `${a.attrs['data-probe-phase']} vs ${b.attrs['data-probe-phase']}`)
+  check('两个会话 data-probing 相同', a.attrs['data-probing'] === b.attrs['data-probing'])
+}
+
+console.log('\n场景 13：切到别的会话不该重播落位动画')
+{
+  // firstReadingAt 很久以前 → 不是「刚出现」，不该播 arrive。
+  const old = snapshot({})
+  old.firstReadingAt = old.now - 600_000
+  installFetch(old)
+  const mod = loadPlugin()
+  const banner = mod.slots[2]
+  mod.renderComponent(banner, {})
+  await sleep(30)
+  const t = collect(mod.renderComponent(banner, {}))
+  check('全局首读很久以前 → 不播落位', !t.classes.has('is-arriving'), [...t.classes].join(','))
+
+  // firstReadingAt 就在刚刚 → 这是全局首读，应该播。
+  const fresh = snapshot({})
+  fresh.firstReadingAt = fresh.now - 200
+  installFetch(fresh)
+  const mod2 = loadPlugin()
+  const banner2 = mod2.slots[2]
+  mod2.renderComponent(banner2, {})
+  await sleep(30)
+  const t2 = collect(mod2.renderComponent(banner2, {}))
+  check('全局首读刚发生 → 播落位', t2.classes.has('is-arriving'), [...t2.classes].join(','))
+}
+
+console.log('\n场景 14：悬停提示显示当前 / 候选延迟')
+{
+  const s = snapshot({})
+  s.current = { ip: '162.159.1.1', p50: 312, p95: 330, at: s.now - 3000 }
+  s.best = { ip: '162.159.2.2', p50: 128, p95: 140 }
+  s.bestBorrowed = false
+  installFetch(s)
+  const mod = loadPlugin()
+  const banner = mod.slots[2]
+  mod.renderComponent(banner, {})
+  await sleep(30)
+  const c = collect(mod.renderComponent(banner, {}))
+  const html = String(c.html ?? '')
+  const all = html + ' ' + String(c.text ?? '')
+  check('提示容器存在', c.classes.has('cfp-tip'), [...c.classes].join(','))
+  check('显示当前延迟 312ms', all.includes('312ms'), all.slice(0, 300))
+  check('显示候选延迟 128ms', all.includes('128ms'))
+  check('有「当前」标签', all.includes('当前'))
+  check('有「候选」标签', all.includes('候选'))
+  check('提示对读屏隐藏（信息已在 aria-label 里）', all.includes('aria-hidden'))
+
+  // 无候选读数时不能编一个数字。
+  const s2 = snapshot({})
+  s2.best = null
+  s2.bestBorrowed = false
+  installFetch(s2)
+  const mod2 = loadPlugin()
+  const b2 = mod2.slots[2]
+  mod2.renderComponent(b2, {})
+  await sleep(30)
+  const c2 = collect(mod2.renderComponent(b2, {}))
+  check('无候选读数时提示显示「暂无数据」',
+    (String(c2.html ?? '') + String(c2.text ?? '')).includes('暂无数据'))
+}
+
+console.log('\n场景 15：配置页读引擎的 manual 状态（跨会话不漏网）')
+{
+  // 轮 4 只把「测速中」提到了引擎，配置页仍读自己的本地 busyAction，
+  // 于是图标点了测速、切到配置页，按钮还是「立即检测」且可点。
+  // 这一场景把配置页接进回归网 —— 它此前零自动化覆盖。
+  const s = snapshot({})
+  s.manual = { phase: 'scan', startedAt: s.now - 3000, note: '测速中…', busy: true }
+  installFetch(s)
+  const mod = loadPlugin()
+  // slots[0] = detail section（整页配置）, slots[1] = row config, slots[2] = dock banner
+  const page = mod.slots[1]
+  mod.renderComponent(page, { view: 'page' })
+  await sleep(30)
+  const tree = mod.renderComponent(page, { view: 'page' })
+  const c = collect(tree)
+  const all = String(c.html ?? '') + String(c.text ?? '')
+
+  check('配置页渲染出来了', tree !== null && c.tags.size > 0)
+  check('扫描中时动作按钮文案不再说「立即检测」', !all.includes('立即检测'), all.slice(0, 400))
+  check('扫描中时显示「检测中…」', all.includes('检测中…'))
+
+  // 禁用状态：找到那个动作按钮，读它的 disabled。
+  const buttons = []
+  ;(function walk(node) {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    const p = node.props ?? {}
+    if (node.type === 'button') buttons.push(p)
+    if (p.children !== undefined) walk(p.children)
+    if (typeof node.type === 'function') {
+      try { walk(globalThis.__renderComponent(node.type, p)) } catch { /* 忽略 */ }
+    }
+  })(tree)
+  const scanBtn = buttons.find((b) => String(b.children ?? '').includes('检测中'))
+  check('扫描中时「检测中…」按钮被禁用', scanBtn?.disabled === true, JSON.stringify(scanBtn?.disabled))
+
+  // 空闲时按钮恢复可用、文案恢复。这是防止「接上 manual 之后永远禁用」的回归。
+  const s2 = snapshot({})
+  s2.manual = { phase: '', startedAt: 0, note: '', busy: false }
+  installFetch(s2)
+  const mod2 = loadPlugin()
+  const page2 = mod2.slots[1]
+  mod2.renderComponent(page2, { view: 'page' })
+  await sleep(30)
+  const c2 = collect(mod2.renderComponent(page2, { view: 'page' }))
+  const all2 = String(c2.html ?? '') + String(c2.text ?? '')
+  check('空闲时恢复「立即检测」', all2.includes('立即检测'))
+
+  // 设置项不能被引擎的测速状态锁死：manual.busy 只该影响两个动作按钮。
+  // 这里用「写入中」阶段验证 —— 它比 scan 更长，最容易误伤。
+  const s3 = snapshot({})
+  s3.manual = { phase: 'write', startedAt: s3.now - 1000, note: '写入中…', busy: true }
+  installFetch(s3)
+  const mod3 = loadPlugin()
+  const page3 = mod3.slots[1]
+  mod3.renderComponent(page3, { view: 'page' })
+  await sleep(30)
+  const c3 = collect(mod3.renderComponent(page3, { view: 'page' }))
+  const all3 = String(c3.html ?? '') + String(c3.text ?? '')
+  check('写入中时「立即切换」显示「写入中…」', all3.includes('写入中…'))
+}
+
+console.log('\n场景 16：最近错误必须能被用户看到')
+{
+  const s = snapshot({ lastError: '写 hosts 失败：EACCES' })
+  installFetch(s)
+  const mod = loadPlugin()
+  const page = mod.slots[1]
+  mod.renderComponent(page, { view: 'page' })
+  await sleep(30)
+  const c = collect(mod.renderComponent(page, { view: 'page' }))
+  const all = String(c.html ?? '') + String(c.text ?? '')
+  check('配置页露出引擎的 lastError', all.includes('EACCES'), all.slice(0, 500))
+
+  // 没有错误时不该凭空多一行。
+  const s2 = snapshot({ lastError: null })
+  installFetch(s2)
+  const mod2 = loadPlugin()
+  const page2 = mod2.slots[1]
+  mod2.renderComponent(page2, { view: 'page' })
+  await sleep(30)
+  const c2 = collect(mod2.renderComponent(page2, { view: 'page' }))
+  check('无错误时不显示「最近错误」行',
+    !(String(c2.html ?? '') + String(c2.text ?? '')).includes('最近错误'))
+}
+
+console.log('\n场景 17：卸载后不该再发 /apply（它会真的改系统 hosts）')
+{
+  // runProbe 是「扫 → 等 1400ms 刹车 → /apply」的串行流程，而 /apply 会改写
+  // 用户的系统 hosts。以前那个等待是裸 setTimeout：用户在这 1.4s 内切走会话
+  // 或关掉配置页，组件卸载了，等待却照常结束，然后仍然发出 /apply ——
+  // 一次用户已经离开的操作，改了他的机器。
+  const s = snapshot({})
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    calls.push(String(url) + ' ' + String(init?.body ?? ''))
+    return { status: 200, json: async () => ({ ok: true, value: { ok: true } }) }
+  }
+
+  const mod = loadPlugin()
+  const banner = mod.slots[2]
+  mod.renderComponent(banner, {})
+  await sleep(30)
+  const tree = mod.renderComponent(banner, {})
+
+  // 找到那枚测速按钮，点它。
+  const buttons = []
+  ;(function walk(node) {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    const p = node.props ?? {}
+    if (node.type === 'button') buttons.push(p)
+    if (p.children !== undefined) walk(p.children)
+    if (typeof node.type === 'function') {
+      try { walk(globalThis.__renderComponent(node.type, p)) } catch { /* 忽略 */ }
+    }
+  })(tree)
+  const scanBtn = buttons.find((b) => String(b['aria-label'] ?? '').includes('点击测速并切换'))
+  check('找到测速按钮', scanBtn !== undefined)
+  check('idle 时按钮可点', scanBtn?.disabled === false)
+
+  scanBtn.onClick()
+  // 让 /scan 落地，但**不要**等满 1400ms 的刹车。
+  await sleep(40)
+  const applyBefore = calls.filter((c) => c.includes('/apply')).length
+  check('扫描后、刹车结束前还没写 hosts', applyBefore === 0, JSON.stringify(calls))
+
+  // 关键动作：在刹车等待期间卸载组件。
+  const unmounted = mod.unmountComponent(banner)
+  check('组件被卸载', unmounted === true)
+
+  // 等到**远超** 1400ms 的刹车时长，确认那次 /apply 真的没有发生。
+  // 必须超过 BRAKE_MS：只等 500ms 的话，「定时器还没到点」也能让断言变绿，
+  // 那样这个用例根本证明不了修复。
+  await sleep(1_600)
+  const appliedAfter = calls.filter((c) => c.includes('/apply')).length
+  check('卸载后不再发 /apply（等满 1600ms > 刹车 1400ms）', appliedAfter === 0,
+    'calls=' + JSON.stringify(calls))
+}
+
+console.log('\n场景 18：降级切换必须区分「相对较好」与「丢包更多」')
+{
+  // 两种降级都是「全部偏慢」，但事实不同：
+  //   - 候选丢包不更高 → 「已切到相对较好的一条」
+  //   - 候选丢包更高   → 「已切到延迟较低的一条（丢包更多）」
+  // 用同一句话就是界面在撒谎。
+  const base = {
+    state: 'degraded-switched',
+    lastSwitch: { at: 1_700_000_000_000 - 5_000, ips: ['162.159.2.2'] },
+    lastSwitchDegraded: true,
+  }
+
+  installFetch(snapshot({ ...base, lastSwitchLossy: false }))
+  const modA = loadPlugin()
+  const bannerA = modA.slots[2]
+  modA.renderComponent(bannerA, {})
+  await sleep(30)
+  const a = collect(modA.renderComponent(bannerA, {}))
+  const textA = String(a.text ?? '') + String(a.html ?? '')
+  check('普通降级说「相对较好」', textA.includes('相对较好'), textA.slice(0, 300))
+  check('普通降级不谎报丢包', !textA.includes('丢包更多'))
+
+  installFetch(snapshot({ ...base, lastSwitchLossy: true }))
+  const modB = loadPlugin()
+  const bannerB = modB.slots[2]
+  modB.renderComponent(bannerB, {})
+  await sleep(30)
+  const b = collect(modB.renderComponent(bannerB, {}))
+  const textB = String(b.text ?? '') + String(b.html ?? '')
+  check('丢包更高时如实说明', textB.includes('丢包更多'), textB.slice(0, 300))
+  check('丢包更高时不再说「相对较好」', !textB.includes('相对较好'))
+}
+
+console.log('\n场景 19：闸门跳过的 IP 必须在配置页可见')
+{
+  // 证书失败被静默跳过时，用户会以为「点了一下什么都没发生」。
+  const s = snapshot({
+    lastSwitch: { at: 1_700_000_000_000 - 5_000, ips: ['162.159.2.2'] },
+    lastSwitchCertNote: '（104.26.0.1 证书校验未通过，已跳过）',
+  })
+  installFetch(s)
+  const mod = loadPlugin()
+  const page = mod.slots[1]
+  mod.renderComponent(page, { view: 'page' })
+  await sleep(30)
+  const c = collect(mod.renderComponent(page, { view: 'page' }))
+  const all = String(c.html ?? '') + String(c.text ?? '')
+  check('配置页露出被跳过的 IP', all.includes('104.26.0.1'), all.slice(0, 500))
+  check('说明是证书校验未通过', all.includes('证书校验未通过'))
+
+  // 没有跳过时不占空行。
+  installFetch(snapshot({}))
+  const mod2 = loadPlugin()
+  const page2 = mod2.slots[1]
+  mod2.renderComponent(page2, { view: 'page' })
+  await sleep(30)
+  const c2 = collect(mod2.renderComponent(page2, { view: 'page' }))
+  const all2 = String(c2.html ?? '') + String(c2.text ?? '')
+  check('没跳过时不显示证书提示', !all2.includes('证书校验未通过'))
 }
 
 console.log('\n总失败数：' + failures)
