@@ -16,7 +16,7 @@ const pluginUrl = (rel) => pathToFileURL(path.join(P, rel)).href
 
 const { Engine, defaultConfig, STATE, currentWindowMs, isReadingReliable, MANUAL_TTL_MS, MANUAL_NOTE_MS, CERT_FAILURE_TTL_MS } = await import(pluginUrl('lib/engine.js'))
 const { readHosts, currentPin } = await import(pluginUrl('lib/hosts.js'))
-const { isBroken, tierOf, sortCandidates, isAllTimeouts, classifyCertVerdict, TIER } = await import(pluginUrl('lib/probe.js'))
+const { isBroken, tierOf, sortCandidates, isAllTimeouts, classifyCertVerdict, TIER, CERT_VERDICT, inspectEdgeResponse } = await import(pluginUrl('lib/probe.js'))
 
 let pass = 0, fail = 0
 const check = (label, cond, extra = '') => {
@@ -650,7 +650,122 @@ console.log('\n[CERT] 闸门结论必须分四类，不能把超时当成证书�
   check('空结论 -> unknown', classifyCertVerdict(null) === 'unknown')
 }
 
-console.log('\n[CERT] 闸门逐候选过滤：首选证书失败不该连累备选')
+console.log('\n[EDGE] 边缘拒绝服务（403 / error code 1034）绝不能被当成健康候选')
+{
+  // 这道断言的来历：2026-11-02 实测 256 个候选里有 14 个返回
+  // `403 error code: 1034`（Edge IP Restricted）。它们的 TLS 握手正常、
+  // 证书也匹配，所以旧的「只做握手」闸门必然放行；而 403 响应体极小、
+  // 回得比正常响应还快，`probeDomain` 量到的 TTFB 反而更低，于是这些
+  // 受限 IP 会被排到最前、写进 hosts。用户的 API 请求随即 403，
+  // 界面拿不到 Cloudflare 边缘错误原文，看起来就像「密钥失效」。
+
+  const http403 = 'HTTP/1.1 403 Forbidden\r\nServer: cloudflare\r\n\r\n'
+  const cf1034 = 'HTTP/1.1 403 Forbidden\r\nServer: cloudflare\r\n\r\n' + 'error code: 1034\n'
+  const healthy = 'HTTP/1.1 200 OK\r\nServer: cloudflare\r\n\r\n' + 'fl=1176f87 h=amr-link.open-design.ai ip=42.236.208.67\ncolo=HKG\n'
+
+  check('纯文本 error code: 1034 判为边缘拒绝',
+    inspectEdgeResponse(cf1034).refused === true, JSON.stringify(inspectEdgeResponse(cf1034)))
+  check('1034 的 note 里带上错误码',
+    /1034/.test(inspectEdgeResponse(cf1034).note), inspectEdgeResponse(cf1034).note)
+  check('403 无 error code 也算边缘拒绝',
+    inspectEdgeResponse(http403).refused === true)
+  check('健康 200 + colo 不算拒绝',
+    inspectEdgeResponse(healthy).refused === false, JSON.stringify(inspectEdgeResponse(healthy)))
+  check('空响应不算拒绝（交给 link 规则）',
+    inspectEdgeResponse('').refused === false)
+  // 没有状态行（比如只有正文）时不能瞎判，但 error code 仍然要抓到。
+  check('缺状态行但正文是 1034 仍判拒绝',
+    inspectEdgeResponse('error code: 1034\n').refused === true)
+
+  // 分类必须把「边缘拒绝」与「证书失败」分开：文案不同，处置才不会被误读。
+  check('边缘拒绝 -> edge',
+    classifyCertVerdict({ ok: false, message: '边缘拒绝服务: error code: 1034（amr-link.open-design.ai）' }) === 'edge')
+  check('edge 不能被 link 规则吃掉',
+    classifyCertVerdict({ ok: false, message: '边缘拒绝服务: HTTP 403' }) === 'edge')
+  check('edge 与 cert 是两回事',
+    classifyCertVerdict({ ok: false, message: '边缘拒绝服务: HTTP 403' }) !== CERT_VERDICT.cert)
+  check('真证书问题仍是 cert',
+    classifyCertVerdict({ ok: false, message: '证书校验失败: Hostname/IP does not match' }) === CERT_VERDICT.cert)
+}
+
+console.log('\n[EDGE] probeDomain 必须真的把 403 记成不可用（而不只是纯函数认识它）')
+{
+  // 段位意义：上一段只测了 inspectEdgeResponse 这个纯函数。把 probeDomain
+  // 里的调用删掉，那些断言照样全绿——正是「只有正则/纯函数断言」那种假绿。
+  // 这一段注入假传输层，真的跑一遍 probeDomain 的取样循环。
+  const { probeDomain } = await import(pluginUrl('lib/probe.js'))
+  const healthyTransport = async () => 'HTTP/1.1 200 OK\r\nServer: cloudflare\r\n\r\ncolo=HKG\n'
+  const refusedTransport = async () => 'HTTP/1.1 403 Forbidden\r\nServer: cloudflare\r\n\r\nerror code: 1034\n'
+  const thin200 = async () => 'HTTP/1.1 200 OK\r\nServer: cloudflare\r\n\r\nfl=abc\ncolo=NRT\n'
+
+  const ok = await probeDomain('1.1.1.1', 'd', {
+    windowMs: 300, intervalMs: 10, timeoutMs: 50, transport: healthyTransport,
+  })
+  check('健康候选采到了样本且未判边缘拒绝', ok.n > 0 && ok.edgeRefused === false, JSON.stringify(ok))
+  check('健康候选 colo 解析出来了', ok.colo === 'HKG', String(ok.colo))
+  check('健康候选丢包为 0', ok.loss === 0, String(ok.loss))
+
+  const refused = await probeDomain('1.1.1.1', 'd', {
+    windowMs: 300, intervalMs: 10, timeoutMs: 50, transport: refusedTransport,
+  })
+  check('★ 403/1034 的候选被标记为 edgeRefused', refused.edgeRefused === true, JSON.stringify(refused))
+  check('★ 受限候选的 loss 是 100（没有一个成功样本）', refused.loss === 100, String(refused.loss))
+  check('★ 受限候选的 p50 不是「很快」——它绝不能参与正常排序',
+    refused.p50 === null || refused.p50 >= 900, String(refused.p50))
+  check('受限候选带上了错误码说明', /1034/.test(refused.edgeNote), refused.edgeNote)
+  check('发现边缘拒绝后不再继续采样（立刻止损）',
+    refused.n === 1 && refused.timeouts === 1, `n=${refused.n} timeouts=${refused.timeouts}`)
+
+  // 对照组：删掉调用就会退化的那种情况——403 必须与「体面的 200」区分开。
+  const thin = await probeDomain('1.1.1.1', 'd', {
+    windowMs: 300, intervalMs: 10, timeoutMs: 50, transport: thin200,
+  })
+  check('正常但很短的 200 仍然算健康（不误杀）',
+    thin.edgeRefused === false && thin.n > 0 && thin.loss === 0, JSON.stringify(thin))
+}
+
+
+{
+  const f = mkHosts(['# >>> CLOUDFLARE-PIN BEGIN (managed by cf_pin.py) >>>', '162.159.150.1 amr-link.open-design.ai', '# <<< CLOUDFLARE-PIN END <<<'])
+  const e = mkEngine(f, { autoWrite: true }, true)
+  e.current = { ip: '162.159.150.1', address: 'amr-link.open-design.ai', p50: 600, p95: 700, loss: 0, samples: 20, at: Date.now(), durationMs: 1, reliable: true }
+  // 首选是受限 IP（延迟最优），备选是健康 IP。
+  e.candidates = [
+    { ip: '162.159.4.1', colo: 'HKG', p50: 180, p95: 200, samples: 40, timeouts: 0, loss: 0, broken: false, qualified: true, perDomain: {} },
+    { ip: '162.159.146.1', colo: 'HKG', p50: 210, p95: 270, samples: 40, timeouts: 0, loss: 0, broken: false, qualified: true, perDomain: {} },
+  ]
+  e.verifyCert = async (ip) => ip === '162.159.4.1'
+    ? { ok: false, message: '边缘拒绝服务: error code: 1034（amr-link.open-design.ai）' }
+    : { ok: true, message: '证书校验通过 · TLSv1.3' }
+
+  const before = readHosts(f)
+  const r = await e.apply({ forced: true })
+  check('首选是受限 IP 时仍然写入健康备选', r.ok === true, JSON.stringify(r))
+  const after = readHosts(f)
+  check('受限 IP 没有被写进 hosts', !after.includes('162.159.4.1'), after)
+  check('健康备选被写进 hosts', after.includes('162.159.146.1'), after)
+  check('hosts 确实变了（不是原样返回）', after !== before)
+
+  // 全部候选都是受限 IP -> 必须失败，且原因不能谎称「证书不通过」。
+  const f2 = mkHosts(['# >>> CLOUDFLARE-PIN BEGIN (managed by cf_pin.py) >>>', '162.159.150.1 amr-link.open-design.ai', '# <<< CLOUDFLARE-PIN END <<<'])
+  const e2 = mkEngine(f2, { autoWrite: true }, true)
+  e2.current = { ip: '162.159.150.1', address: 'amr-link.open-design.ai', p50: 600, p95: 700, loss: 0, samples: 20, at: Date.now(), durationMs: 1, reliable: true }
+  e2.candidates = [
+    { ip: '162.159.4.1', colo: 'HKG', p50: 180, p95: 200, samples: 40, timeouts: 0, loss: 0, broken: false, qualified: true, perDomain: {} },
+    { ip: '162.159.8.1', colo: 'HKG', p50: 190, p95: 210, samples: 40, timeouts: 0, loss: 0, broken: false, qualified: true, perDomain: {} },
+  ]
+  e2.verifyCert = async () => ({ ok: false, message: '边缘拒绝服务: error code: 1034' })
+  const before2 = readHosts(f2)
+  const r2 = await e2.apply({ forced: true })
+  check('候选全为受限 IP 时不写入', r2.ok === false, JSON.stringify(r2))
+  check('失败原因点明是边缘拒绝，而不是「证书不通过」',
+    /边缘/.test(String(r2.reason)) && !/证书校验均未通过/.test(String(r2.reason)), String(r2.reason))
+  check('候选全为受限 IP 时 hosts 一字未动', readHosts(f2) === before2)
+  check('受限 IP 被记进 certFailures，后续轮次不再重试',
+    e2.isCertFailed('162.159.4.1') === true && e2.isCertFailed('162.159.8.1') === true)
+}
+
+
 {
   const f = mkHosts(['# >>> CLOUDFLARE-PIN BEGIN (managed by cf_pin.py) >>>', '162.159.150.1 amr-link.open-design.ai', '# <<< CLOUDFLARE-PIN END <<<'])
   const e = mkEngine(f, { autoWrite: true }, true)
