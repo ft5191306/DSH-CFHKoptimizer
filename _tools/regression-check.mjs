@@ -513,7 +513,7 @@ console.log('\n[CONCURRENCY] 手动路径的并发入口必须合并，而不是
 {
   // 真实现场：图标点了测速（/scan 在飞），切到配置页再点「立即检测」，
   // 或者两个会话各点一次。以前 manualScanNow/apply 都没有互斥，
-  // 两次 /scan 会并发跑两份 256 次 TCP 粗筛 + 12×地址×20s 采样，
+  // 两次 /scan 会并发跑两份 272 次 TCP 粗筛 + 12×地址×20s 采样，
   // 两个 setManualPhase('brake') 互相覆盖；两次 /apply 会交错写 hosts，
   // 而 hosts.bak 只有单份，后一次会覆盖掉前一次的可回滚状态。
   //
@@ -652,7 +652,7 @@ console.log('\n[CERT] 闸门结论必须分四类，不能把超时当成证书�
 
 console.log('\n[EDGE] 边缘拒绝服务（403 / error code 1034）绝不能被当成健康候选')
 {
-  // 这道断言的来历：2026-11-02 实测 256 个候选里有 14 个返回
+  // 这道断言的来历：2026-11-02 实测 272 个候选里有 14 个返回
   // `403 error code: 1034`（Edge IP Restricted）。它们的 TLS 握手正常、
   // 证书也匹配，所以旧的「只做握手」闸门必然放行；而 403 响应体极小、
   // 回得比正常响应还快，`probeDomain` 量到的 TTFB 反而更低，于是这些
@@ -1405,6 +1405,75 @@ console.log('\n[MERGED] 合并写入的收尾：merged 时也不能少')
     JSON.stringify({ phase: e.manual.phase, busy: e.manualNow().busy }))
   check('★ 并且写下了真实结果（不是「写入中…」）',
     /已切到|已写入/.test(e.manualNow().note), JSON.stringify(e.manualNow().note))
+}
+
+console.log('\n[SJC] 三道闸门：候选池 / 可接受机房 / 连接层重试')
+{
+  /**
+   * 2026-11-03 加。这一段守的是「把 SJC 加进候选池」这件事本身。
+   *
+   * 为什么必须有三段独立断言：三道闸门里任何一道没开，SJC 都选不出来，
+   * 但**症状完全一样**（插件继续选 HKG），只看最终结果分不清是哪道。
+   * 上一份实测报告就只发现了闸门 1，差点把「改一行 PRIORITY_RANGES」
+   * 当成完整修复。
+   */
+  const probeMod = await import(pluginUrl('lib/probe.js'))
+  const { buildCandidates, ACCEPTABLE_COLOS, NEAR_COLOS, probeDomain } = probeMod
+
+  // ---- 闸门 1：候选池里真的有 SJC 段
+  const pool = buildCandidates()
+  const sjcPool = pool.filter((ip) => ip.startsWith('104.17.'))
+  check('闸门1：候选池含 16 个 SJC 段地址', sjcPool.length === 16, String(sjcPool.length))
+  check('闸门1：且都是 128-158（实测 SJC 所在的半段）',
+    sjcPool.every((ip) => { const t = Number(ip.split('.')[2]); return t >= 128 && t < 160 }),
+    JSON.stringify(sjcPool))
+
+  // ---- 闸门 2：可接受机房放行 SJC，但不许污染「近端」语义
+  check('闸门2：ACCEPTABLE_COLOS 放行 SJC', ACCEPTABLE_COLOS.has('SJC') === true)
+  check('闸门2：★ NEAR_COLOS 仍然不含 SJC（SJC 不近，它胜在回源拓扑）',
+    NEAR_COLOS.has('SJC') === false)
+  check('闸门2：近端机房仍然全部在可接受集合里（没把 HKG 挤掉）',
+    [...NEAR_COLOS].every((colo) => ACCEPTABLE_COLOS.has(colo)))
+  check('闸门2：远端机房仍然被拒（LAX 不在可接受集合）',
+    ACCEPTABLE_COLOS.has('LAX') === false)
+
+  // ---- 闸门 3：连接层失败要重试一次，且重试成功不得计成丢包
+  // 第 1 次抛错（模拟 SYN 挂死）、第 2 次成功。旧口径会把第 1 次记成 999。
+  let calls = 0
+  const flakyTransport = async () => {
+    calls += 1
+    if (calls % 2 === 1) throw new Error('tcp timeout')
+    return 'HTTP/1.1 200 OK\r\nServer: cloudflare\r\n\r\ncolo=SJC\n'
+  }
+  const rescued = await probeDomain('1.1.1.1', 'd', {
+    windowMs: 400, intervalMs: 10, timeoutMs: 50, transport: flakyTransport,
+  })
+  check('闸门3：★ 连接层失败后重试救回来了（connRetries > 0）',
+    rescued.connRetries > 0, JSON.stringify({ connRetries: rescued.connRetries, loss: rescued.loss }))
+  check('闸门3：★ 救回来之后 loss 不是 100（旧口径会记满丢包）',
+    rescued.loss < 100, String(rescued.loss))
+  check('闸门3：救回来后 tier 可以是 clean（能进最优候选）',
+    rescued.colo === 'SJC' && rescued.n > 0, JSON.stringify({ colo: rescued.colo, n: rescued.n }))
+
+  // 反例：关掉重试，同一个假网络必须如实记丢包。
+  // 段位意义：如果重试开关被删掉、或恒为 true，这条对照组会证明「有开关」不是摆设。
+  calls = 0
+  const noRetry = await probeDomain('1.1.1.1', 'd', {
+    windowMs: 400, intervalMs: 10, timeoutMs: 50, transport: flakyTransport, retryLinkOnce: false,
+  })
+  check('闸门3：关掉重试时，同样的失败必须如实计丢包（对照组）',
+    noRetry.loss > 0, String(noRetry.loss))
+
+  // 反例：持续失败（不是瞬时）时，重试也不该把它救活——否则就是掩盖真故障。
+  const deadTransport = async () => { throw new Error('tcp timeout') }
+  const dead = await probeDomain('1.1.1.1', 'd', {
+    windowMs: 400, intervalMs: 10, timeoutMs: 50, transport: deadTransport,
+  })
+  check('闸门3：持续失败重试也救不活，loss 必须仍是 100',
+    dead.loss === 100 && dead.timeouts === dead.n && dead.n > 0,
+    JSON.stringify({ loss: dead.loss, timeouts: dead.timeouts, n: dead.n }))
+  check('闸门3：持续失败时 p50 是惩罚值（绝不能拿它排序）',
+    dead.p50 === null || dead.p50 >= 900, String(dead.p50))
 }
 
 console.log(`\n总失败数：${fail}  通过：${pass}`)

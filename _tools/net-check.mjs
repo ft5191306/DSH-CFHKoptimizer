@@ -185,11 +185,23 @@ console.log('\n[口径] isBroken —— 「断」只看丢包/超时，不看慢
 console.log('\n[口径] 候选池构造')
 {
   const pool = buildCandidates()
-  check('共 256 个', pool.length === 256, String(pool.length))
-  check('无重复', new Set(pool).size === 256, String(new Set(pool).size))
-  check('全部落在 162.159/16 或 104.26/16', pool.every((ip) => /^(162\.159|104\.26)\.\d+\.1$/.test(ip)))
+  // 2026-11-03：加入 104.17.128.0/17（SJC 段）后从 256 → 272。
+  check('共 272 个', pool.length === 272, String(pool.length))
+  check('无重复', new Set(pool).size === 272, String(new Set(pool).size))
+  check('全部落在 162.159/16、104.26/16 或 104.17.128-159/17',
+    pool.every((ip) => /^(162\.159|104\.26)\.\d+\.1$/.test(ip) || /^104\.17\.(12[89]|1[3-5]\d)\.1$/.test(ip)))
   check('按数值升序', pool.every((ip, i) => i === 0 || key(pool[i - 1]) < key(ip)))
-  check('隔 2 个 /24 取 1（第三段全偶）', pool.every((ip) => Number(ip.split('.')[2]) % 2 === 0))
+  check('162.159/104.26 段隔 2 个 /24 取 1（第三段全偶）',
+    pool.filter((ip) => !ip.startsWith('104.17.')).every((ip) => Number(ip.split('.')[2]) % 2 === 0))
+  // SJC 段的存在性：这是这次改动的**目的**，必须有断言守住。
+  // 段位意义：只测「池子变大了」证明不了 SJC 在里面——把 104.17 换成别的段，
+  // 长度断言照样全绿。必须断言真实的 SJC 段成员。
+  const sjcPool = pool.filter((ip) => ip.startsWith('104.17.'))
+  check('★ 池子里有 16 个 104.17 候选', sjcPool.length === 16, String(sjcPool.length))
+  check('★ SJC 段起点是 104.17.128.1', sjcPool[0] === '104.17.128.1', sjcPool[0])
+  check('★ SJC 段终点是 104.17.158.1', sjcPool[sjcPool.length - 1] === '104.17.158.1', sjcPool[sjcPool.length - 1])
+  check('★ 不含 104.17.0-127（实测全是 LAX，不该浪费粗筛）',
+    !pool.some((ip) => ip.startsWith('104.17.') && Number(ip.split('.')[2]) < 128))
 }
 function key(ip) { return ip.split('.').reduce((a, p) => a * 256 + Number(p), 0) }
 
