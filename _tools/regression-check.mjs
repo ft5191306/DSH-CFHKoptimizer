@@ -513,7 +513,7 @@ console.log('\n[CONCURRENCY] 手动路径的并发入口必须合并，而不是
 {
   // 真实现场：图标点了测速（/scan 在飞），切到配置页再点「立即检测」，
   // 或者两个会话各点一次。以前 manualScanNow/apply 都没有互斥，
-  // 两次 /scan 会并发跑两份 272 次 TCP 粗筛 + 12×地址×20s 采样，
+  // 两次 /scan 会并发跑两份 288 次 TCP 粗筛 + 12×地址×20s 采样，
   // 两个 setManualPhase('brake') 互相覆盖；两次 /apply 会交错写 hosts，
   // 而 hosts.bak 只有单份，后一次会覆盖掉前一次的可回滚状态。
   //
@@ -594,19 +594,51 @@ console.log('\n[TIER] 候选分档只按 timeouts/loss，不按 p95 的数值')
   check('p95=999 但零超时不算全部超时', isAllTimeouts({ timeouts: 0, samples: 40, p95: 999 }) === false)
 }
 
-console.log('\n[TIER] 排序：先档位，同档内按 p50，p95 只做 tiebreak')
+console.log('\n[TIER] 排序：degraded 永远垫底；clean 与 ok 之间按 p50，p95 只做 tiebreak')
 {
   const mk = (ip, p50, p95, loss, timeouts) => ({ ip, p50, p95, loss, timeouts, samples: 40 })
-  // clean 但慢，vs ok 但快得多 —— 档位优先，慢的 clean 仍然排在前面。
-  const slowClean = mk('clean-slow', 500, 999, 0, 0)
+  /**
+   * 2026-11-04 改：旧断言是「档位优先于 p50：慢的 clean 排在快的 ok 之前」，
+   * 即 clean/ok 之间也严格字典序。
+   *
+   * 那条规则在只有 HKG 候选时无害（HKG 之间极差仅 195ms，档位与速度同向），
+   * 但加入 SJC 段后变成了结构性缺陷：SJC 有按 IP 分化的 SYN 挂死
+   * （实测 .140 达 20–35%，.128 仅 0–5%），一个 20s 窗口几乎必然撞上 1 次超时
+   * → tier=ok（loss 2.9%，远低于 7.5% 的「断」线）；而 HKG 162.159.138.1
+   * 多轮 0 挂死 → 稳定 clean。
+   *
+   * 于是插件把 hosts 从 SJC 改回 HKG，即使 HKG 慢 200–450ms。
+   * 2026-11-04 线上实测复现（CF-RAY: ...-HKG，同期 SJC p50 494 vs HKG 700–900）。
+   *
+   * 新规则：clean/ok 都属「可用」，之间由 p50 决定；只有 degraded 是一票否决。
+   * 下面这组断言把新边界钉死，同时保留「degraded 不可被速度翻盘」这条安全底线。
+   */
+  const slowClean = mk('clean-slow', 900, 999, 0, 0)
   const fastOk = mk('ok-fast', 100, 120, 2.5, 1)
   const broken = mk('broken', 50, 60, 20, 8)
 
+  check('前提：三条候选的档位符合预期',
+    tierOf(slowClean) === 'clean' && tierOf(fastOk) === 'ok' && tierOf(broken) === 'degraded',
+    `${tierOf(slowClean)}/${tierOf(fastOk)}/${tierOf(broken)}`)
+
   const sorted = sortCandidates([broken, fastOk, slowClean])
-  check('档位优先于 p50：慢的 clean 排在快的 ok 之前',
-    sorted[0].ip === 'clean-slow', sorted.map((x) => x.ip).join(','))
-  check('ok 排在 degraded 之前', sorted[1].ip === 'ok-fast')
-  check('degraded 垫底', sorted[2].ip === 'broken')
+  check('★ 快的 ok 可以排在慢的 clean 之前（速度优先，不再拿 1 次超时压 800ms）',
+    sorted[0].ip === 'ok-fast', sorted.map((x) => x.ip).join(','))
+  check('★ 但 degraded 永远垫底，哪怕它 p50 最快（安全不可被速度翻盘）',
+    sorted[2].ip === 'broken', sorted.map((x) => x.ip).join(','))
+
+  // 反过来也要成立：clean 比 ok 快时，clean 在前。否则就是把档位彻底删了。
+  const fastClean = mk('clean-fast', 100, 120, 0, 0)
+  const slowOk = mk('ok-slow', 500, 560, 2.5, 1)
+  const sorted2 = sortCandidates([slowOk, fastClean])
+  check('★ 同属可用时 clean 若更快仍然在前（档位没被删掉，只是不再压速度）',
+    sorted2[0].ip === 'clean-fast', sorted2.map((x) => x.ip).join(','))
+
+  // 安全底线的最强形式：一条 degraded 无论多快都不能进前二。
+  const fastestBroken = mk('broken-fast', 10, 12, 50, 20)
+  const sorted3 = sortCandidates([fastestBroken, slowClean])
+  check('★ 20ms 的 degraded 仍然排在 900ms 的 clean 之后（一票否决）',
+    sorted3[0].ip === 'clean-slow', sorted3.map((x) => x.ip).join(','))
 
   // 同档内按 p50 升序（p95 更差也不影响）。
   const a = mk('a', 300, 400, 0, 0)
@@ -652,7 +684,7 @@ console.log('\n[CERT] 闸门结论必须分四类，不能把超时当成证书�
 
 console.log('\n[EDGE] 边缘拒绝服务（403 / error code 1034）绝不能被当成健康候选')
 {
-  // 这道断言的来历：2026-11-02 实测 272 个候选里有 14 个返回
+  // 这道断言的来历：2026-11-02 实测 256 个候选里有 14 个返回
   // `403 error code: 1034`（Edge IP Restricted）。它们的 TLS 握手正常、
   // 证书也匹配，所以旧的「只做握手」闸门必然放行；而 403 响应体极小、
   // 回得比正常响应还快，`probeDomain` 量到的 TTFB 反而更低，于是这些
@@ -1480,6 +1512,92 @@ console.log('\n[SJC] 三道闸门：候选池 / 可接受机房 / 连接层重�
     JSON.stringify({ loss: dead.loss, timeouts: dead.timeouts, n: dead.n }))
   check('闸门3：持续失败时 p50 是惩罚值（绝不能拿它排序）',
     dead.p50 === null || dead.p50 >= 900, String(dead.p50))
+
+  /**
+   * 2026-11-04 加，修审计发现的高危问题：重试把真实故障洗白。
+   *
+   * 重试后样本级丢包率 ≈ p²，所以单次尝试失败率 p<27% 时 `isBroken` 判「通」。
+   * 审计构造出极端反例：**首连 100% 失败、只靠重试连上**的线路，
+   * 旧口径给出 `loss=0, timeouts=0, tier=clean` —— 会被写进 hosts，
+   * 而用户侧没有这层重试，每次新建连接都要吃满超时。
+   *
+   * 修法：`connRetries > 0` 时最高只判 `ok`，永不 `clean`。
+   */
+  const { tierOf } = await import(pluginUrl('lib/probe.js'))
+  check('★ 修3a：零超时零丢包且无重试 → clean（不误伤正常线路）',
+    tierOf({ timeouts: 0, loss: 0, samples: 40, connRetries: 0 }) === 'clean',
+    String(tierOf({ timeouts: 0, loss: 0, samples: 40, connRetries: 0 })))
+  check('★ 修3a：零超时零丢包但**靠重试才活** → 只能 ok，绝不能 clean',
+    tierOf({ timeouts: 0, loss: 0, samples: 40, connRetries: 5 }) === 'ok',
+    String(tierOf({ timeouts: 0, loss: 0, samples: 40, connRetries: 5 })))
+  check('★ 修3a：缺 connRetries 字段时按 0 处理（老调用方不炸）',
+    tierOf({ timeouts: 0, loss: 0, samples: 40 }) === 'clean',
+    String(tierOf({ timeouts: 0, loss: 0, samples: 40 })))
+  check('★ 修3a：重试不能掩盖真正的「断」（丢包仍判 degraded）',
+    tierOf({ timeouts: 8, loss: 20, samples: 40, connRetries: 3 }) === 'degraded',
+    String(tierOf({ timeouts: 8, loss: 20, samples: 40, connRetries: 3 })))
+}
+
+console.log('\n[SJCGATE2] 闸门 2 的 engine 接线必须有行为断言（不是只断言 Set 内容）')
+{
+  /**
+   * 2026-11-04 加。来自一次独立审计的实测发现：
+   *
+   * 上一版闸门 2 只有 4 条断言，全部只检查 `ACCEPTABLE_COLOS` / `NEAR_COLOS`
+   * 两个 Set 的**内容**。审计员把 `engine.js` 里两处过滤从 `ACCEPTABLE_COLOS`
+   * 改回 `NEAR_COLOS`（等于把这道闸门整个关掉），**回归 268 项全绿，一条没红**。
+   *
+   * 而行为差异是最坏的那种：候选池全是 SJC 时，
+   *   正常引擎 → 12 个候选；变异引擎 → 0 个候选、判定退到 `no-candidate`。
+   *
+   * 根因：Set 的内容被守住了，`engine.js` 有没有**用**它完全没人管。
+   * 两件事在「SJC 选不选得出来」上等价，但测试只覆盖了前者。
+   *
+   * 这一段注入一个「候选池全是 SJC、tlsTrace 返回 SJC」的假 probe，
+   * 真的跑一遍 `runCandidateRoundOnce` / `runManualScan`，断言候选真的活下来。
+   * 只要 engine 的过滤退回 `NEAR_COLOS`，SJC 全部被筛掉，这里立刻变红。
+   */
+  const sjcIps = ['104.17.128.1', '104.17.132.1', '104.17.136.1', '104.17.144.1',
+    '104.17.148.1', '104.17.152.1', '104.17.156.1', '104.17.159.1',
+    '104.17.130.1', '104.17.134.1', '104.17.138.1', '104.17.142.1']
+  const mkProbe = () => ({
+    buildCandidates: () => sjcIps.slice(),
+    async tcpRtt(ip) { return { rtt: 150 + Number(ip.split('.')[2]) % 10, loss: 0 } },
+    // 关键：tlsTrace 一律返回 SJC —— 这些候选只有靠 ACCEPTABLE_COLOS 才放行
+    async tlsTrace() { return { colo: 'SJC', totalMs: 480 } },
+    async probeDomain() { return { domain: 'x', n: 40, p50: 500, p95: 560, loss: 0, timeouts: 0 } },
+  })
+
+  const f = mkHosts(['# >>> CLOUDFLARE-PIN BEGIN (managed by cf_pin.py) >>>', '162.159.150.1 amr-link.open-design.ai', '# <<< CLOUDFLARE-PIN END <<<'])
+  const e = new Engine({
+    dataDir: tmp, hostsFile: f, log: () => {}, config: cfg(), verifyCert: fakeCert(true), probe: mkProbe(),
+  })
+  e.admin = true; e.reloadFromHosts()
+
+  await e.runCandidateRoundOnce(false)
+  check('★ 闸门2：引擎真的放行了 SJC 候选（不是只在 probe.js 里定义了集合）',
+    e.candidates.length > 0, JSON.stringify({ n: e.candidates.length, reason: e.decision?.reason }))
+  check('★ 闸门2：判定不是 no-candidate（接回 NEAR_COLOS 会退到这个）',
+    e.decision.reason !== 'no-candidate', String(e.decision.reason))
+  check('★ 闸门2：候选的 colo 确实是 SJC（证明走到了 SJC 分支）',
+    e.candidates.length > 0 && e.candidates.every((c) => c.colo === 'SJC'),
+    JSON.stringify(e.candidates.map((c) => c.colo)))
+
+  // 手动扫描路径同样要覆盖：审计只发现自动轮，但手动路径是另一处独立过滤。
+  const measured = []
+  const probe2 = mkProbe()
+  probe2.probeDomain = async (ip) => {
+    measured.push(ip)
+    return { domain: 'x', n: 40, p50: 500, p95: 560, loss: 0, timeouts: 0 }
+  }
+  const f2 = mkHosts(['# >>> CLOUDFLARE-PIN BEGIN (managed by cf_pin.py) >>>', '162.159.150.1 amr-link.open-design.ai', '# <<< CLOUDFLARE-PIN END <<<'])
+  const e2 = new Engine({
+    dataDir: tmp, hostsFile: f2, log: () => {}, config: cfg(), verifyCert: fakeCert(true), probe: probe2,
+  })
+  e2.admin = true; e2.reloadFromHosts()
+  const scan = await e2.runManualScan()
+  check('★ 闸门2：手动「立即检测」也能测到 SJC 候选',
+    scan.ok === true && measured.length > 0, JSON.stringify({ ok: scan.ok, measured: measured.length }))
 }
 
 console.log(`\n总失败数：${fail}  通过：${pass}`)
