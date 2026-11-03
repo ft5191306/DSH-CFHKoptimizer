@@ -185,11 +185,30 @@ console.log('\n[口径] isBroken —— 「断」只看丢包/超时，不看慢
 console.log('\n[口径] 候选池构造')
 {
   const pool = buildCandidates()
-  check('共 256 个', pool.length === 256, String(pool.length))
-  check('无重复', new Set(pool).size === 256, String(new Set(pool).size))
-  check('全部落在 162.159/16 或 104.26/16', pool.every((ip) => /^(162\.159|104\.26)\.\d+\.1$/.test(ip)))
+  // 2026-11-03：加入 SJC 段 104.17.128-159（32 个全取）后从 256 → 288。
+  check('共 288 个', pool.length === 288, String(pool.length))
+  check('无重复', new Set(pool).size === 288, String(new Set(pool).size))
+  check('全部落在 162.159/16、104.26/16 或 104.17.128-159',
+    pool.every((ip) => /^(162\.159|104\.26)\.\d+\.1$/.test(ip) || /^104\.17\.(12[89]|1[3-5]\d)\.1$/.test(ip)))
   check('按数值升序', pool.every((ip, i) => i === 0 || key(pool[i - 1]) < key(ip)))
-  check('隔 2 个 /24 取 1（第三段全偶）', pool.every((ip) => Number(ip.split('.')[2]) % 2 === 0))
+  check('162.159/104.26 段隔 2 个 /24 取 1（第三段全偶）',
+    pool.filter((ip) => !ip.startsWith('104.17.')).every((ip) => Number(ip.split('.')[2]) % 2 === 0))
+  // SJC 段的存在性：这是这次改动的**目的**，必须有断言守住。
+  // 段位意义：只测「池子变大了」证明不了 SJC 在里面——把 104.17 换成别的段，
+  // 长度断言照样全绿。必须断言真实的 SJC 段成员。
+  const sjcPool = pool.filter((ip) => ip.startsWith('104.17.'))
+  check('★ 池子里有 32 个 104.17 候选（整段全取）', sjcPool.length === 32, String(sjcPool.length))
+  check('★ SJC 段起点是 104.17.128.1', sjcPool[0] === '104.17.128.1', sjcPool[0])
+  check('★ SJC 段终点是 104.17.159.1', sjcPool[sjcPool.length - 1] === '104.17.159.1', sjcPool[sjcPool.length - 1])
+  // 段位意义：这条守住「整段全取」这个决定本身。改成步长 2（只取 16 个）会让它变红
+  // ——那正是这次要修的东西。三轮实测确认段内 32/32 全是 SJC，隔一个取等于白扔一半。
+  check('★ 段内 32 个是连续全取（第三段 128..159 一个不缺）',
+    sjcPool.length === 32 && sjcPool.every((ip, i) => Number(ip.split('.')[2]) === 128 + i),
+    JSON.stringify(sjcPool.map((ip) => Number(ip.split('.')[2]))))
+  check('★ 不含 104.17.0-127（实测全是 LAX，不该浪费粗筛）',
+    !pool.some((ip) => ip.startsWith('104.17.') && Number(ip.split('.')[2]) < 128))
+  check('★ 不含 104.17.160+（实测全是 LAX，段外溢出即错）',
+    !pool.some((ip) => ip.startsWith('104.17.') && Number(ip.split('.')[2]) >= 160))
 }
 function key(ip) { return ip.split('.').reduce((a, p) => a * 256 + Number(p), 0) }
 

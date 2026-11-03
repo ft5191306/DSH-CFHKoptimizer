@@ -65,7 +65,7 @@ window.__ModuleLoader__.load({
        * 永远不会执行 —— 配置页三个按钮会**永久 disabled**，用户只能刷新页面。
        * 引擎侧有 MANUAL_TTL_MS 兜底，配置页这一侧以前没有任何兜底。
        *
-       * 120s 足够覆盖最慢的一次 /scan（256 次粗筛 + 12×地址×20s 采样），
+       * 120s 足够覆盖最慢的一次 /scan（288 次粗筛 + 12×地址×20s 采样），
        * 又不至于让用户对着不动的按钮等太久。
        */
       const response = await fetch('/api/dsh-cf-pin/' + path, {
