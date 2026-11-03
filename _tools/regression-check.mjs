@@ -1423,10 +1423,16 @@ console.log('\n[SJC] 三道闸门：候选池 / 可接受机房 / 连接层重�
   // ---- 闸门 1：候选池里真的有 SJC 段
   const pool = buildCandidates()
   const sjcPool = pool.filter((ip) => ip.startsWith('104.17.'))
-  check('闸门1：候选池含 16 个 SJC 段地址', sjcPool.length === 16, String(sjcPool.length))
-  check('闸门1：且都是 128-158（实测 SJC 所在的半段）',
-    sjcPool.every((ip) => { const t = Number(ip.split('.')[2]); return t >= 128 && t < 160 }),
+  check('闸门1：候选池含 32 个 SJC 段地址（整段全取）', sjcPool.length === 32, String(sjcPool.length))
+  check('闸门1：且都是 128-159（三轮实测 32/32 全 SJC，边界干净）',
+    sjcPool.every((ip) => { const t = Number(ip.split('.')[2]); return t >= 128 && t <= 159 }),
     JSON.stringify(sjcPool))
+  // 段位意义：这条守「整段连续全取」。改回步长 2（16 个）会让它红。
+  check('闸门1：★ 32 个第三段连续无缺（128..159）',
+    sjcPool.every((ip, i) => Number(ip.split('.')[2]) === 128 + i),
+    JSON.stringify(sjcPool.map((ip) => Number(ip.split('.')[2]))))
+  check('闸门1：★ 段外不溢出（无 127，无 160）',
+    !pool.some((ip) => /^104\.17\.(127|160)\.1$/.test(ip)))
 
   // ---- 闸门 2：可接受机房放行 SJC，但不许污染「近端」语义
   check('闸门2：ACCEPTABLE_COLOS 放行 SJC', ACCEPTABLE_COLOS.has('SJC') === true)
