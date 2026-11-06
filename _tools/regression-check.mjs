@@ -513,7 +513,7 @@ console.log('\n[CONCURRENCY] 手动路径的并发入口必须合并，而不是
 {
   // 真实现场：图标点了测速（/scan 在飞），切到配置页再点「立即检测」，
   // 或者两个会话各点一次。以前 manualScanNow/apply 都没有互斥，
-  // 两次 /scan 会并发跑两份 288 次 TCP 粗筛 + 12×地址×20s 采样，
+  // 两次 /scan 会并发跑两份 56 次 TCP 粗筛 + 12×地址×20s 采样，
   // 两个 setManualPhase('brake') 互相覆盖；两次 /apply 会交错写 hosts，
   // 而 hosts.bak 只有单份，后一次会覆盖掉前一次的可回滚状态。
   //

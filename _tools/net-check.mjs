@@ -186,11 +186,25 @@ console.log('\n[口径] 候选池构造')
 {
   const pool = buildCandidates()
   // 2026-11-03：加入 SJC 段 104.17.128-159（32 个全取）后从 256 → 288。
-  check('共 288 个', pool.length === 288, String(pool.length))
-  check('无重复', new Set(pool).size === 288, String(new Set(pool).size))
-  check('全部落在 162.159/16、104.26/16 或 104.17.128-159',
-    pool.every((ip) => /^(162\.159|104\.26)\.\d+\.1$/.test(ip) || /^104\.17\.(12[89]|1[3-5]\d)\.1$/.test(ip)))
+  // 2026-11-06：实测 288 个里只有 24 个是 HKG（162.159.128-158 偶数 16 + 104.26.0-14 偶数 8），
+  // 其余 232 个是 LAX / TCP 443 不可达 / FRA·AMS-DOG·DEN，全部删除后 288 → 56。
+  check('共 56 个', pool.length === 56, String(pool.length))
+  check('无重复', new Set(pool).size === 56, String(new Set(pool).size))
+  check('全部落在 162.159.128-158（偶）、104.26.0-14（偶）或 104.17.128-159',
+    pool.every((ip) => /^162\.159\.(12[89]|1[3-5][02468])\.1$/.test(ip)
+      || /^104\.26\.(0|2|4|6|8|10|12|14)\.1$/.test(ip)
+      || /^104\.17\.(12[89]|1[3-5]\d)\.1$/.test(ip)))
   check('按数值升序', pool.every((ip, i) => i === 0 || key(pool[i - 1]) < key(ip)))
+  check('162.159 段只剩 128-158 的偶数 /24（160 起是 FRA / 不可达）',
+    pool.filter((ip) => ip.startsWith('162.159.')).every((ip) => {
+      const third = Number(ip.split('.')[2])
+      return third >= 128 && third <= 158 && third % 2 === 0
+    }))
+  check('104.26 段只剩 0-14 的偶数 /24（16 起 TCP 443 不可达）',
+    pool.filter((ip) => ip.startsWith('104.26.')).every((ip) => {
+      const third = Number(ip.split('.')[2])
+      return third >= 0 && third <= 14 && third % 2 === 0
+    }))
   check('162.159/104.26 段隔 2 个 /24 取 1（第三段全偶）',
     pool.filter((ip) => !ip.startsWith('104.17.')).every((ip) => Number(ip.split('.')[2]) % 2 === 0))
   // SJC 段的存在性：这是这次改动的**目的**，必须有断言守住。
